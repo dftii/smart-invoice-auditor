@@ -1,0 +1,42 @@
+# Contexto de build del backend: solo entra lo necesario para ejecutar la aplicación.
+
+# Entornos virtuales locales (Windows y Linux/macOS)
+.venv/
+venv/
+env/
+
+# Datos generados: SQLite, facturas subidas y ficheros de ejecución
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secretos y configuración local: nunca dentro de la imagen
+.env
+.env.*
+!.env.example
+
+# Cachés y artefactos de herramientas
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Tests y configuración de desarrollo: no forman parte de la imagen
+tests/
+pytest.ini
+requirements-dev.in
+requirements-dev.txt
+requirements.in
+
+# Logs y IDE
+*.log
+.vscode/
+.idea/

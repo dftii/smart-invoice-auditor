@@ -42,7 +42,7 @@ El flujo de una factura es lineal: el extractor produce un resultado normalizado
 | Extracción | Anthropic SDK (Claude Vision), pypdf, Pillow |
 | Facturae | lxml, signxml (firma XAdES), cryptography |
 | Exportación CSV | Biblioteca estándar de Python |
-| Tests | pytest, httpx, Ruff |
+| Tests | pytest, pytest-cov, httpx, Ruff |
 | Contenedores | Docker, Docker Compose |
 
 ## Estructura del proyecto
@@ -73,16 +73,21 @@ smart-invoice-auditor/
 │   │   ├── schemas.py
 │   │   └── main.py
 │   ├── scripts/
-│   │   └── generate_sample_invoices.py
+│   │   ├── generate_sample_invoices.py
+│   │   └── seed.py
 │   ├── samples/              # facturas PDF/PNG de ejemplo
 │   ├── tests/
-│   ├── requirements.txt
-│   ├── requirements-dev.txt
+│   ├── requirements.in
+│   ├── requirements-dev.in
+│   ├── requirements.txt      # generado con uv, versiones fijadas
+│   ├── requirements-dev.txt  # generado con uv, versiones fijadas
 │   ├── pytest.ini
 │   ├── Dockerfile
+│   ├── .dockerignore
 │   └── .env.example
 ├── frontend/                 # Fase 2
 ├── docker-compose.yml
+├── .env.example
 └── README.md
 ```
 
@@ -92,23 +97,24 @@ smart-invoice-auditor/
 
 - Python 3.11 o superior.
 - Opcional: una clave de API de Anthropic para el Modo IA.
-- Opcional: Docker y Docker Compose.
+- Opcional: Docker Desktop o Docker Engine con Docker Compose v2.24 o superior (ver [Docker](#docker)).
 
 ### Inicio rápido
 
 Todos los comandos se ejecutan desde el directorio `backend/`.
 
-**Windows (PowerShell)**
+**Windows (PowerShell 5.1 o superior)**
 
 ```powershell
 cd backend
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-python scripts/generate_sample_invoices.py
-uvicorn app.main:app --reload
+.\.venv\Scripts\python.exe scripts/generate_sample_invoices.py
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
+
+Estos comandos usan el Python del entorno virtual directamente, sin activarlo. PowerShell 5.1 no admite `&&`, así que cada comando va en su propia línea. Si prefieres activar el entorno con `.\.venv\Scripts\Activate.ps1`, es posible que antes tengas que permitir la ejecución de scripts locales con `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 **Linux / macOS**
 
@@ -126,13 +132,7 @@ Abre **http://localhost:8000/docs** para ver y probar la API. El script `generat
 
 ### Ejecución con Docker
 
-Desde la raíz del repositorio:
-
-```bash
-docker compose up --build
-```
-
-La API queda disponible en http://localhost:8000/docs. Los datos se guardan en el volumen `invoice_data`. Para usar MySQL, consulta la sección [Migración a MySQL](#migración-a-mysql).
+Desde la raíz del repositorio, `docker compose up --build` construye la imagen y arranca la API en http://localhost:8000/docs. Los detalles (datos de demostración, MySQL, volúmenes) están en la sección [Docker](#docker).
 
 ### Configuración
 
@@ -183,7 +183,7 @@ SQLAlchemy abstrae el motor, por lo que el cambio consiste en configurar la URL 
    uvicorn app.main:app --reload
    ```
 
-Para usar MySQL con Docker Compose, basta con levantar el perfil `mysql` (`docker compose --profile mysql up --build -d`) y usar como host `mysql` en la URL. Las instrucciones detalladas están en el encabezado de `docker-compose.yml`.
+Para usar MySQL con Docker Compose, define la URL con el host `mysql` en el `.env` de la raíz y levanta el perfil `mysql`. Los pasos completos están en la sección [Docker](#docker).
 
 **Importante:** no se incluye una herramienta de migración de datos. Una base de datos MySQL nueva empieza vacía; los datos existentes en SQLite no se copian automáticamente.
 
@@ -281,15 +281,96 @@ FACTURAE_CERT_PASSWORD=contraseña-del-certificado
 
 El certificado debe estar en formato PKCS#12 (`.p12` o `.pfx`). Si `FACTURAE_CERT_PATH` está vacía, el XML se genera sin firma. **FACe exige facturas firmadas**, por lo que para enviar facturas a FACe es necesario configurar un certificado válido.
 
-## Tests
+## Datos de demostración (seed)
 
-Desde el directorio `backend/`, con el entorno virtual activado:
+El script `backend/scripts/seed.py` carga datos de demostración en la base de datos configurada en `DATABASE_URL` (SQLite por defecto). Se ejecuta desde `backend/`:
 
-```bash
-pytest
+```powershell
+.\.venv\Scripts\python.exe scripts/seed.py
+.\.venv\Scripts\python.exe scripts/seed.py --reset
 ```
 
-Los tests usan una base de datos SQLite en memoria y no requieren clave de API de Anthropic.
+Opciones:
+
+- `--reset`: elimina los datos existentes antes de cargar los de demostración.
+- `--database-url URL`: usa esa base de datos en lugar de la definida en `DATABASE_URL`.
+
+Con Docker, el servicio `seed` ejecuta el mismo script sobre el volumen de datos del backend (ver [Docker](#docker)).
+
+## Docker
+
+Los ficheros de contenedor son `backend/Dockerfile`, `backend/.dockerignore` y `docker-compose.yml`. La imagen se construye en dos fases sobre `python:3.12-slim`, ejecuta la aplicación con un usuario no privilegiado y expone un healthcheck sobre `/health`. Los datos de SQLite y las facturas subidas se guardan en el volumen con nombre `backend-data`, montado en `/app/data`.
+
+### Construir y arrancar
+
+Desde la raíz del repositorio:
+
+```powershell
+docker compose up --build
+```
+
+Para ejecutarlo en segundo plano, añade `-d`. La API queda disponible en http://localhost:8000/docs.
+
+### Datos de demostración
+
+El servicio `seed` está en el perfil `seed`, así que solo se ejecuta si lo pides. Termina al acabar la carga:
+
+```powershell
+docker compose --profile seed run --rm seed
+docker compose --profile seed run --rm seed --reset
+```
+
+Los argumentos de `run` (como `--reset`) se añaden a `python scripts/seed.py`.
+
+### MySQL
+
+El servicio `mysql` (MySQL 8.4, utf8mb4) está en el perfil `mysql`. Para usarlo, define la URL en el `.env` de la raíz (copia `.env.example`). Dentro de Compose el host es `mysql`, no `localhost`:
+
+```env
+DATABASE_URL=mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4
+```
+
+Después, levanta los servicios con el perfil:
+
+```powershell
+docker compose --profile mysql up --build -d
+```
+
+En Bash también puedes indicar la variable en la propia línea: `DATABASE_URL=mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4 docker compose --profile mysql up --build`. En PowerShell usa `$env:DATABASE_URL = "..."` antes del comando.
+
+Si usas esa URL, activa siempre el perfil `mysql`, también para el seed: `docker compose --profile mysql --profile seed run --rm seed`. El backend espera a que MySQL supere su healthcheck antes de arrancar.
+
+Para parar los servicios, usa `docker compose --profile mysql down`. Añade `-v` solo si quieres borrar también los volúmenes `backend-data` y `mysql-data`; es irreversible.
+
+### Variables de entorno
+
+- `backend/.env` (opcional) se pasa al contenedor como variables de entorno. Sus rutas deben ser las del contenedor, no rutas de Windows.
+- `.env` de la raíz (copia de `.env.example`) solo sustituye variables de Compose: `DATABASE_URL` y las credenciales de `mysql`. Como Compose aplica estas variables después de `backend/.env`, `DATABASE_URL` de la raíz o del shell prevalece sobre la de `backend/.env` dentro de Docker.
+
+## Tests y cobertura
+
+Desde el directorio `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest --cov=app --cov-report=term-missing
+```
+
+Los tests usan una base de datos SQLite en memoria y no requieren clave de API de Anthropic. El informe HTML de cobertura, si lo generas con `--cov-report=html`, se escribe en `htmlcov/`, que está fuera de Git.
+
+## Dependencias
+
+Las dependencias se declaran en `backend/requirements.in` (ejecución) y `backend/requirements-dev.in` (desarrollo, que incluye `-r requirements.in`). Los ficheros `requirements.txt` y `requirements-dev.txt` contienen versiones exactas generadas con [uv](https://docs.astral.sh/uv/). No los edites a mano.
+
+Para cambiar una dependencia, edita el `.in` correspondiente y regenera desde `backend/`:
+
+```powershell
+uv pip compile --universal --python-version 3.11 requirements.in -o requirements.txt
+uv pip compile --universal --python-version 3.11 requirements-dev.in -c requirements.txt -o requirements-dev.txt
+uv pip sync requirements-dev.txt
+```
+
+La compilación de `requirements-dev.txt` usa `-c requirements.txt`, así que las versiones de ejecución y de desarrollo coinciden. `uv pip sync` deja el entorno exactamente como indica el fichero, por lo que elimina los paquetes que no estén listados. La imagen Docker instala `requirements.txt`, así que tras cambiarlo vuelve a construirla con `docker compose build`.
 
 ## Roadmap
 

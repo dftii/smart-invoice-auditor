@@ -18,19 +18,27 @@ class Base(DeclarativeBase):
     pass
 
 
+def configure_sqlite_connection(dbapi_connection, _connection_record=None) -> None:
+    """Enable foreign keys and replace SQLite's ASCII-only lower() with Unicode-aware folding.
+
+    SQLAlchemy renders ILIKE as lower(x) LIKE lower(y) on SQLite, so this makes searches such as
+    'PAPELERÍA' match 'Papelería', as they already do under MySQL's utf8mb4 collations.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+    dbapi_connection.create_function(
+        "lower", 1, lambda value: value.lower() if isinstance(value, str) else value, deterministic=True
+    )
+
+
 def build_engine(database_url: str, echo: bool = False) -> Engine:
     url = make_url(database_url)
     if url.get_backend_name() == "sqlite":
         if url.database and url.database != ":memory:":
             Path(url.database).parent.mkdir(parents=True, exist_ok=True)
         engine = create_engine(database_url, echo=echo, connect_args={"check_same_thread": False})
-
-        @event.listens_for(engine, "connect")
-        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
+        event.listen(engine, "connect", configure_sqlite_connection)
         return engine
 
     settings = get_settings()

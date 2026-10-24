@@ -465,7 +465,7 @@ class InvoiceAuditor:
         checks.append(
             self._check_tax_total(
                 VAT_TOTAL,
-                label="IVA total",
+                label="El IVA total",
                 field="total_vat",
                 declared=total_vat,
                 rate_groups=_group_by_rate((line.vat_rate, line.line_base, line.vat_amount) for line in lines),
@@ -475,7 +475,7 @@ class InvoiceAuditor:
         checks.append(
             self._check_tax_total(
                 IRPF_TOTAL,
-                label="retención de IRPF total",
+                label="La retención de IRPF total",
                 field="total_irpf",
                 declared=total_irpf,
                 rate_groups=_group_by_rate((line.irpf_rate, line.line_base, line.irpf_amount) for line in lines),
@@ -522,7 +522,7 @@ class InvoiceAuditor:
         by_lines = _round(sum((amount for _, amount in rate_groups.values()), Decimal(0)))
 
         if _same(by_group, declared, tolerance) or _same(by_lines, declared, tolerance):
-            return _ok(rule_code, f"El {label} ({_eur(declared)}) coincide con el calculado", field=field)
+            return _ok(rule_code, f"{label} ({_eur(declared)}) coincide con el calculado", field=field)
 
         if by_group == by_lines:
             reference = f"debería ser {_eur(by_group)}"
@@ -533,7 +533,7 @@ class InvoiceAuditor:
         return _fail(
             rule_code,
             Severity.ERROR,
-            f"El {label} {reference} y figura {_eur(declared)} (diferencia {_eur(abs(by_group - declared))})",
+            f"{label} {reference} y figura {_eur(declared)} (diferencia {_eur(abs(by_group - declared))})",
             field=field,
             expected=f"{by_group:.2f}",
             actual=f"{_round(declared):.2f}",

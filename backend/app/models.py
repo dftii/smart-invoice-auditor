@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from app.db.database import Base
 
@@ -59,6 +60,28 @@ class Severity(str, enum.Enum):
     ERROR = "ERROR"
 
 
+class UTCDateTime(TypeDecorator[datetime]):
+    """Stores datetimes in UTC and always returns them timezone-aware.
+
+    SQLite and MySQL DATETIME drop the offset, so values read back would otherwise be naive.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def enum_column(enum_cls: type[enum.Enum], length: int) -> Enum:
     """Portable VARCHAR-backed enum that stores the member value (not the name)."""
     return Enum(
@@ -77,9 +100,9 @@ UNIT_PRICE = Numeric(18, 6)
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
 
@@ -155,7 +178,7 @@ class Invoice(TimestampMixin, Base):
     audit_summary: Mapped[str | None] = mapped_column(Text)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     warning_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_audited_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_audit_run_id: Mapped[str | None] = mapped_column(String(36))
 
     extraction_method: Mapped[ExtractionMethod] = mapped_column(
@@ -232,7 +255,7 @@ class ValidationLog(Base):
     line_number: Mapped[int | None] = mapped_column(Integer)
     expected_value: Mapped[str | None] = mapped_column(String(100))
     actual_value: Mapped[str | None] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     invoice: Mapped[Invoice] = relationship(back_populates="validation_logs")
 

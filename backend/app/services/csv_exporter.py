@@ -3,7 +3,7 @@
 import csv
 import io
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from app.models import AuditStatus, ExtractionMethod, Invoice, InvoiceLine
@@ -45,7 +45,7 @@ INVOICE_COLUMNS = [
     "Resumen auditoría",
     "Método extracción",
     "Archivo origen",
-    "Fecha auditoría",
+    "Fecha auditoría (UTC)",
 ]
 LINE_COLUMNS = [
     "Línea",
@@ -75,7 +75,11 @@ def _date(value: date | None) -> str:
 
 
 def _datetime(value: datetime | None) -> str:
-    return value.replace(microsecond=0).isoformat() if value else ""
+    if not value:
+        return ""
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return value.replace(microsecond=0).isoformat()
 
 
 def _money(value: Decimal) -> str:

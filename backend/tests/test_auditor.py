@@ -1,8 +1,9 @@
 """Tests for the invoice auditor: every rule (pass and fail), rounding, duplicates, status priority and persistence."""
 
 import itertools
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from sqlalchemy import func, select
@@ -65,6 +66,7 @@ BUYER_CIF = "P0800000B"
 TODAY = date(2024, 6, 30)
 CENT = Decimal("0.01")
 _counter = itertools.count(1)
+REAL_TODAY = auditor_module._today  # captured before the autouse fixture replaces it
 
 
 def q(value) -> Decimal:
@@ -154,6 +156,10 @@ def failed(report, rule_code, severity=None):
     return [c for c in checks_for(report, rule_code) if not c.passed and (severity is None or c.severity is severity)]
 
 
+def failed_rules(report) -> set[str]:
+    return {c.rule_code for c in report.checks if not c.passed}
+
+
 @pytest.fixture(autouse=True)
 def fixed_today(monkeypatch):
     monkeypatch.setattr(auditor_module, "_today", lambda: TODAY)
@@ -215,6 +221,78 @@ class TestCleanInvoice:
         assert invoice.id is not None
         assert report.invoice_id == invoice.id
         assert report.status is AuditStatus.VALIDATED
+
+    def test_transient_invoice_is_attached_to_the_session(self, db_session, auditor):
+        invoice = make_invoice(db_session, flush=False)
+        db_session.expunge(invoice)
+        assert invoice not in db_session
+
+        report = auditor.audit(invoice)
+
+        assert invoice in db_session
+        assert invoice.id is not None
+        assert report.status is AuditStatus.VALIDATED
+
+
+class TestHelpers:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, "0"), (3, "3"), (1.1, "1.1"), (Decimal("2.50"), "2.50"), ("7.25", "7.25")],
+    )
+    def test_dec_coerces_without_float_noise(self, value, expected):
+        result = auditor_module._dec(value)
+        assert isinstance(result, Decimal)
+        assert result == Decimal(expected)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("0.125", "0.13"),
+            ("2.675", "2.68"),
+            ("1.005", "1.01"),
+            ("0.995", "1.00"),
+            ("0.124", "0.12"),
+            ("0.135", "0.14"),
+            ("-0.125", "-0.13"),
+            ("-0.124", "-0.12"),
+            ("10", "10.00"),
+        ],
+    )
+    def test_round_is_half_up_on_exact_decimals(self, value, expected):
+        assert str(auditor_module._round(Decimal(value))) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "decimals", "expected"),
+        [
+            ("21.00", 0, "21"),
+            ("100", 0, "100"),
+            ("0", 0, "0"),
+            ("0.125", 2, "0.125"),
+            ("50", 2, "50.00"),
+            ("3.5", 2, "3.50"),
+            ("10.000", 2, "10.00"),
+        ],
+    )
+    def test_num_has_no_trailing_zeros_but_honours_minimum_decimals(self, value, decimals, expected):
+        assert auditor_module._num(Decimal(value), decimals) == expected
+
+    def test_eur_formats_two_decimals_without_thousand_separator(self):
+        assert auditor_module._eur(Decimal("1234.5")) == "1234.50 €"
+        assert auditor_module._eur(Decimal("0.005")) == "0.01 €"
+
+    @pytest.mark.parametrize(
+        ("a", "b", "tolerance", "expected"),
+        [
+            ("10.00", "10.00", "0.01", True),
+            ("10.00", "10.004", "0.01", True),  # equal once rounded to cents
+            ("10.00", "10.01", "0.01", False),
+            ("10.00", "10.01", "0.02", True),
+            ("10.00", "10.02", "0.02", False),
+            ("10.00", "9.97", "0.05", True),
+        ],
+    )
+    def test_same_compares_at_cent_level(self, a, b, tolerance, expected):
+        assert auditor_module._same(Decimal(a), Decimal(b), Decimal(tolerance)) is expected
 
 
 class TestSupplierTaxId:
@@ -338,9 +416,35 @@ class TestDates:
         invoice = make_invoice(db_session, operation_date=date(2024, 3, 1))
         assert not failed(auditor.audit(invoice), DATES)
 
-    def test_today_uses_spanish_calendar_date_without_tzdata(self, monkeypatch):
-        monkeypatch.undo()
-        assert isinstance(auditor_module._today(), date)
+    def test_today_is_the_madrid_calendar_date_not_the_utc_one(self, monkeypatch):
+        try:
+            ZoneInfo("Europe/Madrid")
+        except ZoneInfoNotFoundError:
+            pytest.skip("tz database not available")
+
+        class LateNightUtc(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2024, 6, 30, 23, 30, tzinfo=UTC).astimezone(tz)
+
+        monkeypatch.setattr(auditor_module, "datetime", LateNightUtc)
+        assert REAL_TODAY() == date(2024, 7, 1)  # 23:30 UTC is already 01:30 on the 1st in Madrid (CEST)
+
+    def test_today_falls_back_to_utc_without_tzdata(self, monkeypatch):
+        class LateNightUtc(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2024, 6, 30, 23, 30, tzinfo=UTC).astimezone(tz)
+
+        def missing_zone(_key):
+            raise ZoneInfoNotFoundError("Europe/Madrid")
+
+        monkeypatch.setattr(auditor_module, "datetime", LateNightUtc)
+        monkeypatch.setattr(auditor_module, "ZoneInfo", missing_zone)
+        assert REAL_TODAY() == date(2024, 6, 30)
+
+    def test_real_today_is_a_date(self):
+        assert type(REAL_TODAY()) is date
 
 
 class TestLines:
@@ -406,11 +510,6 @@ class TestLines:
         [check] = failed(auditor.audit(invoice), LINE_BASE)
         assert check.expected_value == "2.51"
         assert check.actual_value == "2.50"
-
-    def test_one_cent_difference_is_reported(self, db_session, auditor):
-        invoice = make_invoice(db_session, [line(1, "10.00", vat=0, line_base="10.01")])
-        [check] = failed(auditor.audit(invoice), LINE_BASE)
-        assert "diferencia 0.01 €" in check.message
 
     def test_tolerance_setting_widens_the_comparison(self, db_session):
         invoice = make_invoice(db_session, [line(1, "10.00", vat=0, line_base="10.01")])
@@ -550,10 +649,6 @@ class TestTotals:
         )
         assert not failed(report, GRAND_TOTAL)
 
-    def test_tax_base_one_cent_off(self, db_session, auditor):
-        invoice = make_invoice(db_session, tax_base=Decimal("300.01"), total_amount=Decimal("363.01"))
-        assert failed(auditor.audit(invoice), TAX_BASE_SUM)
-
     def test_vat_total_mismatch(self, db_session, auditor):
         invoice = make_invoice(db_session, total_vat=Decimal("60.00"), total_amount=Decimal("360.00"))
         report = auditor.audit(invoice)
@@ -596,11 +691,6 @@ class TestTotals:
         wrong = make_invoice(db_session, [line(1, "1000.00", irpf=15)], total_amount=Decimal("1360.00"))
         [check] = failed(auditor.audit(wrong), GRAND_TOTAL)
         assert check.expected_value == "1060.00"
-
-    def test_grand_total_one_cent_off(self, db_session, auditor):
-        invoice = make_invoice(db_session, total_amount=Decimal("363.01"))
-        [check] = failed(auditor.audit(invoice), GRAND_TOTAL)
-        assert "diferencia 0.01 €" in check.message
 
     def test_mixed_vat_rates_exact_totals(self, db_session, auditor):
         specs = [line(1, "100.00", vat=21), line(2, "50.00", vat=10), line(3, "25.00", vat=4)]
@@ -693,6 +783,384 @@ class TestRoundingStrategies:
             total_amount=Decimal("230.00"),
         )
         assert failed(auditor.audit(invoice), VAT_TOTAL)
+
+
+class TestCentMismatches:
+    """Errors of a few cents are errors: exact rule, message, expected and actual values for each of them.
+
+    The default invoice is 2 x 50.00 + 1 x 200.00 at 21%: base 300.00, VAT 63.00, total 363.00.
+    """
+
+    @pytest.mark.parametrize(
+        ("overrides", "rule", "expected", "actual", "tail"),
+        [
+            pytest.param(
+                {"total_vat": D("63.01"), "total_amount": D("363.01")},
+                VAT_TOTAL,
+                "63.00",
+                "63.01",
+                "debería ser 63.00 € y figura 63.01 € (diferencia 0.01 €)",
+                id="vat-total-plus-1-cent",
+            ),
+            pytest.param(
+                {"total_vat": D("62.99"), "total_amount": D("362.99")},
+                VAT_TOTAL,
+                "63.00",
+                "62.99",
+                "debería ser 63.00 € y figura 62.99 € (diferencia 0.01 €)",
+                id="vat-total-minus-1-cent",
+            ),
+            pytest.param(
+                {"total_amount": D("363.02")},
+                GRAND_TOTAL,
+                "363.00",
+                "363.02",
+                "debería ser 363.00 € (300.00 € + 63.00 € de IVA - 0.00 € de IRPF) y figura 363.02 € (diferencia 0.02 €)",
+                id="grand-total-plus-2-cents",
+            ),
+            pytest.param(
+                {"total_amount": D("362.98")},
+                GRAND_TOTAL,
+                "363.00",
+                "362.98",
+                "debería ser 363.00 € (300.00 € + 63.00 € de IVA - 0.00 € de IRPF) y figura 362.98 € (diferencia 0.02 €)",
+                id="grand-total-minus-2-cents",
+            ),
+            pytest.param(
+                {"tax_base": D("300.03"), "total_amount": D("363.03")},
+                TAX_BASE_SUM,
+                "300.00",
+                "300.03",
+                "debería ser 300.00 € (suma de las bases de las líneas) y figura 300.03 € (diferencia 0.03 €)",
+                id="tax-base-plus-3-cents",
+            ),
+            pytest.param(
+                {"tax_base": D("299.97"), "total_amount": D("362.97")},
+                TAX_BASE_SUM,
+                "300.00",
+                "299.97",
+                "debería ser 300.00 € (suma de las bases de las líneas) y figura 299.97 € (diferencia 0.03 €)",
+                id="tax-base-minus-3-cents",
+            ),
+        ],
+    )
+    def test_total_level_mismatch_is_the_only_failure(
+        self, db_session, auditor, overrides, rule, expected, actual, tail
+    ):
+        report = auditor.audit(make_invoice(db_session, **overrides))
+
+        assert failed_rules(report) == {rule}
+        [check] = failed(report, rule)
+        assert check.severity is Severity.ERROR
+        assert check.message.endswith(tail)
+        assert (check.expected_value, check.actual_value) == (expected, actual)
+        assert check.line_number is None
+        assert (report.status, report.error_count, report.warning_count) == (AuditStatus.DISCREPANCY, 1, 0)
+
+    def test_total_irpf_off_by_one_cent(self, db_session, auditor):
+        invoice = make_invoice(
+            db_session,
+            [line(1, "1000.00", irpf=15)],
+            total_irpf=D("150.01"),
+            total_amount=D("1059.99"),  # 1000.00 + 210.00 - 150.01: only the IRPF total is wrong
+        )
+        report = auditor.audit(invoice)
+
+        assert failed_rules(report) == {IRPF_TOTAL}
+        [check] = failed(report, IRPF_TOTAL)
+        assert check.message.endswith("debería ser 150.00 € y figura 150.01 € (diferencia 0.01 €)")
+        assert "retención de IRPF total" in check.message
+        assert (check.expected_value, check.actual_value) == ("150.00", "150.01")
+        assert check.field == "total_irpf"
+
+    def test_total_irpf_message_uses_feminine_article(self, db_session, auditor):
+        invoice = make_invoice(
+            db_session, [line(1, "1000.00", irpf=15)], total_irpf=D("150.01"), total_amount=D("1059.99")
+        )
+        [check] = failed(auditor.audit(invoice), IRPF_TOTAL)
+        assert check.message.startswith("La retención de IRPF total debería ser")
+
+    @pytest.mark.parametrize(
+        ("vat_amount", "diff"),
+        [("42.01", "0.01"), ("41.99", "0.01"), ("42.02", "0.02")],
+    )
+    def test_line_vat_off_by_cents(self, db_session, auditor, vat_amount, diff):
+        report = auditor.audit(make_invoice(db_session, [line(1, "200.00", vat_amount=vat_amount)]))
+
+        # The invoice VAT total is the sum of the declared line VATs, so only the line rule can see the error.
+        assert failed_rules(report) == {LINE_VAT}
+        [check] = failed(report, LINE_VAT)
+        assert check.line_number == 1
+        assert check.field == "vat_amount"
+        assert check.message == (
+            f"Línea 1: la cuota de IVA debería ser 42.00 € (200.00 € × 21%) y figura {vat_amount} € "
+            f"(diferencia {diff} €)"
+        )
+        assert (check.expected_value, check.actual_value) == ("42.00", vat_amount)
+
+    @pytest.mark.parametrize(("irpf_amount", "diff"), [("150.01", "0.01"), ("149.99", "0.01"), ("149.97", "0.03")])
+    def test_line_irpf_off_by_cents(self, db_session, auditor, irpf_amount, diff):
+        report = auditor.audit(make_invoice(db_session, [line(1, "1000.00", irpf=15, irpf_amount=irpf_amount)]))
+
+        assert failed_rules(report) == {LINE_IRPF}
+        [check] = failed(report, LINE_IRPF)
+        assert check.message == (
+            f"Línea 1: la retención de IRPF debería ser 150.00 € (1000.00 € × 15%) y figura {irpf_amount} € "
+            f"(diferencia {diff} €)"
+        )
+        assert (check.expected_value, check.actual_value) == ("150.00", irpf_amount)
+
+    @pytest.mark.parametrize(
+        ("spec", "expected", "actual", "detail"),
+        [
+            # 3 x 3.33 = 9.99; 15% off -> 8.4915 -> 8.49. A supplier who rounds up gets 8.50.
+            pytest.param(
+                {"quantity": 3, "unit_price": "3.33", "discount": 15, "line_base": "8.50", "vat_amount": "1.79"},
+                "8.49",
+                "8.50",
+                "3 × 3.33 € - 15% de descuento",
+                id="discount-rounded-up",
+            ),
+            # 0.50 - 5% = 0.475 -> 0.48 (half up); a supplier who rounds half down declares 0.47.
+            pytest.param(
+                {"quantity": 1, "unit_price": "0.50", "discount": 5, "line_base": "0.47", "vat_amount": "0.10"},
+                "0.48",
+                "0.47",
+                "1 × 0.50 € - 5% de descuento",
+                id="discount-half-cent-rounded-down",
+            ),
+            # 7 x 1.15 = 8.05, no discount: 1 cent too much.
+            pytest.param(
+                {"quantity": 7, "unit_price": "1.15", "line_base": "8.06", "vat_amount": "1.69"},
+                "8.05",
+                "8.06",
+                "7 × 1.15 €",
+                id="no-discount-plus-1-cent",
+            ),
+        ],
+    )
+    def test_line_base_off_by_one_cent(self, db_session, auditor, spec, expected, actual, detail):
+        report = auditor.audit(make_invoice(db_session, [line(**spec)]))
+
+        assert failed_rules(report) == {LINE_BASE}
+        [check] = failed(report, LINE_BASE)
+        assert check.line_number == 1
+        assert check.field == "line_base"
+        assert check.message == (
+            f"Línea 1: la base imponible debería ser {expected} € ({detail}) y figura {actual} € (diferencia 0.01 €)"
+        )
+        assert (check.expected_value, check.actual_value) == (expected, actual)
+
+    def test_every_cent_error_is_reported_at_once(self, db_session, auditor):
+        invoice = make_invoice(db_session, tax_base=D("300.03"), total_vat=D("63.01"), total_amount=D("363.02"))
+        report = auditor.audit(invoice)
+
+        assert failed_rules(report) == {TAX_BASE_SUM, VAT_TOTAL, GRAND_TOTAL}
+        assert report.error_count == 3
+        [grand] = failed(report, GRAND_TOTAL)
+        assert grand.expected_value == "363.04"  # follows the declared base and VAT: 300.03 + 63.01
+        assert grand.message.endswith(
+            "(300.03 € + 63.01 € de IVA - 0.00 € de IRPF) y figura 363.02 € (diferencia 0.02 €)"
+        )
+        assert all(c.message in report.summary for c in report.checks if not c.passed)
+
+    def test_exact_amounts_are_not_flagged(self, db_session, auditor):
+        report = auditor.audit(make_invoice(db_session))
+        assert failed_rules(report) == set()
+
+    @pytest.mark.parametrize(
+        ("tolerance", "diff", "flagged"),
+        [
+            ("0.01", "0.00", False),
+            ("0.01", "0.01", True),
+            ("0.02", "0.01", False),
+            ("0.02", "0.02", True),
+            ("0.05", "0.03", False),
+            ("0.05", "0.05", True),
+        ],
+    )
+    @pytest.mark.parametrize("rule", [GRAND_TOTAL, TAX_BASE_SUM, VAT_TOTAL])
+    def test_tolerance_boundary(self, db_session, tolerance, diff, flagged, rule):
+        delta = D(diff)
+        overrides = {
+            GRAND_TOTAL: {"total_amount": D("363.00") + delta},
+            TAX_BASE_SUM: {"tax_base": D("300.00") + delta, "total_amount": D("363.00") + delta},
+            VAT_TOTAL: {"total_vat": D("63.00") + delta, "total_amount": D("363.00") + delta},
+        }[rule]
+        auditor = InvoiceAuditor(db_session, Settings(audit_tolerance=D(tolerance)))
+        report = auditor.audit(make_invoice(db_session, **overrides))
+        assert bool(failed(report, rule)) is flagged
+
+
+HALF_UP_CASES = [
+    pytest.param({"quantity": 1, "unit_price": "0.125"}, "line_base", "0.13", "0.12", LINE_BASE, id="base-0.125"),
+    pytest.param({"quantity": 1, "unit_price": "2.675"}, "line_base", "2.68", "2.67", LINE_BASE, id="base-2.675"),
+    pytest.param({"quantity": 1, "unit_price": "1.005"}, "line_base", "1.01", "1.00", LINE_BASE, id="base-1.005"),
+    pytest.param({"quantity": "0.5", "unit_price": "0.25"}, "line_base", "0.13", "0.12", LINE_BASE, id="base-0.5x0.25"),
+    pytest.param(
+        {"quantity": 1, "unit_price": "0.50", "discount": 5},
+        "line_base",
+        "0.48",
+        "0.47",
+        LINE_BASE,
+        id="base-discount",
+    ),
+    pytest.param(
+        {"quantity": 1, "unit_price": "1.25", "vat": 10}, "vat_amount", "0.13", "0.12", LINE_VAT, id="vat-0.125"
+    ),
+    pytest.param({"quantity": 1, "unit_price": "0.50"}, "vat_amount", "0.11", "0.10", LINE_VAT, id="vat-0.105"),
+    pytest.param({"quantity": 1, "unit_price": "2.50"}, "vat_amount", "0.53", "0.52", LINE_VAT, id="vat-0.525"),
+    pytest.param(
+        {"quantity": 1, "unit_price": "0.50", "irpf": 15},
+        "irpf_amount",
+        "0.08",
+        "0.07",
+        LINE_IRPF,
+        id="irpf-0.075",
+    ),
+    pytest.param(
+        {"quantity": 1, "unit_price": "0.25", "irpf": 2},
+        "irpf_amount",
+        "0.01",
+        "0.00",
+        LINE_IRPF,
+        id="irpf-0.005",
+    ),
+]
+
+
+class TestHalfUpBoundaries:
+    """Exact Decimal x.xx5 values must round away from zero (ROUND_HALF_UP), never to even and never via float."""
+
+    @pytest.mark.parametrize(("spec", "field", "correct", "wrong", "rule"), HALF_UP_CASES)
+    def test_half_up_value_is_accepted(self, db_session, auditor, spec, field, correct, wrong, rule):
+        built = line(**spec)
+        assert built[field] == D(correct)
+        report = auditor.audit(make_invoice(db_session, [built]))
+        assert failed(report, rule) == []
+        assert report.error_count == 0
+
+    @pytest.mark.parametrize(("spec", "field", "correct", "wrong", "rule"), HALF_UP_CASES)
+    def test_half_even_or_float_artifact_is_rejected(self, db_session, auditor, spec, field, correct, wrong, rule):
+        report = auditor.audit(make_invoice(db_session, [line(**spec, **{field: wrong})]))
+        [check] = failed(report, rule)
+        assert (check.expected_value, check.actual_value) == (correct, wrong)
+        assert "diferencia 0.01 €" in check.message
+
+    def test_base_message_shows_the_unrounded_unit_price(self, db_session, auditor):
+        report = auditor.audit(make_invoice(db_session, [line(1, "0.125", line_base="0.12", vat_amount="0.03")]))
+        [check] = failed(report, LINE_BASE)
+        assert check.message == (
+            "Línea 1: la base imponible debería ser 0.13 € (1 × 0.125 €) y figura 0.12 € (diferencia 0.01 €)"
+        )
+
+    def test_negative_amounts_round_away_from_zero(self, db_session, auditor):
+        credit_note = line(-1, "0.125", line_base="-0.13", vat_amount="-0.03")
+        assert credit_note["line_base"] == D("-0.13")
+        assert not failed(auditor.audit(make_invoice(db_session, [credit_note])), LINE_BASE)
+
+        banker = line(-1, "0.125", line_base="-0.12", vat_amount="-0.03")
+        [check] = failed(auditor.audit(make_invoice(db_session, [banker])), LINE_BASE)
+        assert (check.expected_value, check.actual_value) == ("-0.13", "-0.12")
+
+    def test_declared_total_is_compared_after_half_up_rounding(self, db_session, auditor):
+        # 2.675 as an exact Decimal is the cent 2.68 (a float 2.675 would round down to 2.67).
+        base = line(1, "2.68")
+        accepted = make_invoice(db_session, [base], tax_base=D("2.675"), total_amount=D("3.24"))
+        assert not failed(auditor.audit(accepted), TAX_BASE_SUM)
+
+        rejected = make_invoice(db_session, [base], tax_base=D("2.674"), total_amount=D("3.23"))
+        report = auditor.audit(rejected)
+        assert failed_rules(report) == {TAX_BASE_SUM}
+        [check] = failed(report, TAX_BASE_SUM)
+        assert (check.expected_value, check.actual_value) == ("2.68", "2.67")
+
+    def test_group_vat_half_cent_is_rounded_up(self, db_session, auditor):
+        # Two 10% lines of 0.25 + 1.00: per line 0.03 + 0.10 = 0.13; per group 1.25 * 10% = 0.125 -> 0.13.
+        specs = [line(1, "0.25", vat=10), line(1, "1.00", vat=10)]
+        assert [s["vat_amount"] for s in specs] == [D("0.03"), D("0.10")]
+        good = make_invoice(db_session, specs, total_vat=D("0.13"), total_amount=D("1.38"))
+        assert failed_rules(auditor.audit(good)) == set()
+
+        banker = make_invoice(db_session, specs, total_vat=D("0.12"), total_amount=D("1.37"))
+        [check] = failed(auditor.audit(banker), VAT_TOTAL)
+        assert (check.expected_value, check.actual_value) == ("0.13", "0.12")
+
+
+class TestRoundingStrategyMessages:
+    """Per-rate-group and per-line VAT/IRPF rounding are both accepted; anything else is reported precisely."""
+
+    @staticmethod
+    def five_small_lines():
+        # 5 x 0.50 at 21%: 0.105 -> 0.11 per line (0.55 in total) but 2.50 * 21% = 0.525 -> 0.53 per group.
+        return [line(1, "0.50") for _ in range(5)]
+
+    @pytest.mark.parametrize(("total_vat", "total_amount"), [("0.55", "3.05"), ("0.53", "3.03")])
+    def test_both_strategies_are_accepted(self, db_session, auditor, total_vat, total_amount):
+        invoice = make_invoice(
+            db_session, self.five_small_lines(), total_vat=D(total_vat), total_amount=D(total_amount)
+        )
+        assert failed_rules(auditor.audit(invoice)) == set()
+
+    @pytest.mark.parametrize(("total_vat", "diff"), [("0.52", "0.01"), ("0.54", "0.01"), ("0.56", "0.03")])
+    def test_a_value_between_or_beyond_the_two_strategies_is_rejected(self, db_session, auditor, total_vat, diff):
+        total_amount = D("2.50") + D(total_vat)
+        invoice = make_invoice(db_session, self.five_small_lines(), total_vat=D(total_vat), total_amount=total_amount)
+        report = auditor.audit(invoice)
+
+        assert failed_rules(report) == {VAT_TOTAL}
+        [check] = failed(report, VAT_TOTAL)
+        assert check.message == (
+            "El IVA total debería ser 0.53 € (redondeo por tipo impositivo) o 0.55 € (suma de las líneas) "
+            f"y figura {total_vat} € (diferencia {diff} €)"
+        )
+        assert (check.expected_value, check.actual_value) == ("0.53", total_vat)
+
+    def test_message_lists_both_strategies_exactly(self, db_session, auditor):
+        specs = [line(1, "0.50"), line(1, "0.50"), line(1, "100.00", vat=10), line(1, "25.00", vat=4)]
+        invoice = make_invoice(db_session, specs, total_vat=D("11.23"), total_amount=D("137.23"))
+        [check] = failed(auditor.audit(invoice), VAT_TOTAL)
+        assert check.message == (
+            "El IVA total debería ser 11.21 € (redondeo por tipo impositivo) o 11.22 € (suma de las líneas) "
+            "y figura 11.23 € (diferencia 0.02 €)"
+        )
+        assert (check.expected_value, check.actual_value) == ("11.21", "11.23")
+
+    def test_single_reference_when_both_strategies_agree(self, db_session, auditor):
+        invoice = make_invoice(db_session, total_vat=D("63.02"), total_amount=D("363.02"))
+        [check] = failed(auditor.audit(invoice), VAT_TOTAL)
+        assert check.message == "El IVA total debería ser 63.00 € y figura 63.02 € (diferencia 0.02 €)"
+        assert "redondeo por tipo impositivo" not in check.message
+
+    def test_irpf_total_neither_strategy(self, db_session, auditor):
+        # 2 x 0.50 at 7%: 0.035 -> 0.04 per line (0.08), 1.00 * 7% = 0.07 per group.
+        specs = [line(1, "0.50", irpf=7), line(1, "0.50", irpf=7)]
+        invoice = make_invoice(db_session, specs, total_irpf=D("0.09"), total_amount=D("1.00") + D("0.22") - D("0.09"))
+        report = auditor.audit(invoice)
+
+        assert failed_rules(report) == {IRPF_TOTAL}
+        [check] = failed(report, IRPF_TOTAL)
+        assert check.message.endswith(
+            "debería ser 0.07 € (redondeo por tipo impositivo) o 0.08 € (suma de las líneas) "
+            "y figura 0.09 € (diferencia 0.02 €)"
+        )
+        assert (check.expected_value, check.actual_value) == ("0.07", "0.09")
+
+    def test_each_rate_group_is_rounded_on_its_own(self, db_session, auditor):
+        specs = [line(1, "0.50", vat=21), line(1, "0.50", vat=21), line(1, "0.05", vat=10), line(1, "0.05", vat=10)]
+        by_group = D("0.21") + D("0.01")  # 1.00 * 21% + 0.10 * 10%
+        by_lines = D("0.11") * 2 + D("0.01") * 2  # 0.105 -> 0.11 and 0.005 -> 0.01 per line
+        assert [s["vat_amount"] for s in specs] == [D("0.11"), D("0.11"), D("0.01"), D("0.01")]
+        assert (by_group, by_lines) == (D("0.22"), D("0.24"))
+        for total_vat, accepted in ((by_group, True), (by_lines, True), (D("0.23"), False)):
+            invoice = make_invoice(db_session, specs, total_vat=total_vat, total_amount=D("1.10") + total_vat)
+            assert (not failed(auditor.audit(invoice), VAT_TOTAL)) is accepted, total_vat
+
+    def test_difference_is_measured_against_the_per_group_value(self, db_session, auditor):
+        specs = [line(1, "0.50"), line(1, "0.50"), line(1, "100.00", vat=10), line(1, "25.00", vat=4)]
+        invoice = make_invoice(db_session, specs, total_vat=D("11.20"), total_amount=D("137.20"))
+        [check] = failed(auditor.audit(invoice), VAT_TOTAL)
+        assert check.message.endswith("y figura 11.20 € (diferencia 0.01 €)")
 
 
 class TestDuplicates:
@@ -811,17 +1279,22 @@ class TestDuplicates:
 
 
 class TestCurrencyAndDir3:
-    @pytest.mark.parametrize("currency", ["USD", "GBP", "eur "])
-    def test_currency_other_than_eur(self, db_session, auditor, currency):
+    @pytest.mark.parametrize(("currency", "shown"), [("USD", "USD"), ("gbp", "GBP"), ("  ", "no indicada")])
+    def test_currency_other_than_eur(self, db_session, auditor, currency, shown):
         invoice = make_invoice(db_session, currency=currency)
         report = auditor.audit(invoice)
-        if currency.strip().upper() == "EUR":
-            assert not failed(report, CURRENCY)
-            return
         [check] = failed(report, CURRENCY)
         assert check.severity is Severity.WARNING
         assert check.expected_value == "EUR"
+        assert check.actual_value == (shown if shown != "no indicada" else None)
+        assert check.message == f"La moneda de la factura es '{shown}' y FACe requiere EUR"
         assert report.status is AuditStatus.VALIDATED
+
+    @pytest.mark.parametrize("currency", ["EUR", "eur", " eur "])
+    def test_eur_in_any_case_is_valid(self, db_session, auditor, currency):
+        report = auditor.audit(make_invoice(db_session, currency=currency))
+        assert not failed(report, CURRENCY)
+        assert report.warning_count == 0
 
     @pytest.mark.parametrize(
         ("field", "label"),
@@ -881,7 +1354,7 @@ class TestStatusPriority:
         assert report.warning_count == 1
         assert report.error_count == 1
 
-    def test_duplicate_warning_does_not_apply(self, db_session, auditor):
+    def test_non_duplicate_with_an_error_is_a_plain_discrepancy(self, db_session, auditor):
         # Only DUPLICATE errors lead to the DUPLICATE status.
         make_invoice(db_session, invoice_number="Q-1")
         invoice = make_invoice(db_session, invoice_number="Q-2", total_amount=Decimal("1.00"))

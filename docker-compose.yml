@@ -4,12 +4,26 @@
 #   docker compose up --build
 #   API y documentación interactiva en http://localhost:8000/docs
 #
-# EJECUCIÓN CON MYSQL:
-#   1. Copia backend/.env.example a backend/.env y define la URL de MySQL usando
-#      el nombre del servicio de Compose como host (no "localhost", que dentro del
-#      contenedor del backend apunta a sí mismo):
+# CONFIGURACIÓN:
+#   - backend/.env (opcional) se pasa al contenedor del backend como variables de entorno.
+#   - .env en la raíz (copia de .env.example) sustituye las variables de este fichero
+#     (DATABASE_URL, MYSQL_*). Compose aplica "environment" después de "env_file", así que
+#     DATABASE_URL de la raíz o del shell prevalece sobre la de backend/.env dentro de Docker.
+#
+# DATOS DE DEMOSTRACIÓN (servicio seed, perfil "seed"):
+#   docker compose --profile seed run --rm seed
+#   Para vaciar antes la base de datos, añade --reset al final:
+#   docker compose --profile seed run --rm seed --reset
+#   El servicio ejecuta "python scripts/seed.py" sobre el mismo volumen y base de datos
+#   que el backend, y espera a que el backend esté sano.
+#
+# EJECUCIÓN CON MYSQL (perfil "mysql"):
+#   1. Define la URL en el .env de la raíz o en el shell. Dentro de Compose el host es
+#      "mysql" (el nombre del servicio), no "localhost":
 #        DATABASE_URL=mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4
-#   2. Levanta el servicio mysql activando su perfil:
+#      PowerShell:  $env:DATABASE_URL = "mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4"
+#      Bash:        DATABASE_URL=mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4 docker compose --profile mysql up
+#   2. Levanta los servicios con el perfil mysql:
 #        docker compose --profile mysql up --build -d
 #      El backend espera a que MySQL supere su healthcheck antes de arrancar.
 #   3. Para parar los servicios: docker compose --profile mysql down
@@ -18,44 +32,76 @@
 # Para ejecutar el backend en local con MySQL (sin Docker) usa en backend/.env el host
 # "localhost" y el puerto publicado 3306 del servicio mysql.
 #
-# Los datos de SQLite y las facturas subidas se guardan en el volumen "invoice_data".
-# Las variables de backend/.env se cargan si el fichero existe.
+# Los datos de SQLite y las facturas subidas se guardan en el volumen "backend-data".
 
 services:
   backend:
     build: ./backend
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
       - path: ./backend/.env
         required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/smartinvoice.db}
     volumes:
-      - invoice_data:/app/data
+      - backend-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       mysql:
         condition: service_healthy
         required: false
 
+  seed:
+    build: ./backend
+    profiles: ["seed"]
+    restart: "no"
+    # El ENTRYPOINT fija el script; los argumentos de "run" (p. ej. --reset) se añaden al final.
+    entrypoint: ["python", "scripts/seed.py"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/smartinvoice.db}
+    volumes:
+      - backend-data:/app/data
+    # La imagen define un healthcheck para el servidor HTTP; el seed es un proceso puntual.
+    healthcheck:
+      disable: true
+    depends_on:
+      backend:
+        condition: service_healthy
+
   mysql:
     image: mysql:8.4
     profiles: ["mysql"]
-    # Credenciales de desarrollo local. No usar en producción.
+    restart: unless-stopped
+    # Credenciales de desarrollo local. Cámbialas en el .env de la raíz; no usar en producción.
     environment:
-      MYSQL_ROOT_PASSWORD: smartinvoice-root
-      MYSQL_DATABASE: smartinvoice
-      MYSQL_USER: smartinvoice
-      MYSQL_PASSWORD: smartinvoice
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-smartinvoice-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-smartinvoice}
+      MYSQL_USER: ${MYSQL_USER:-smartinvoice}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-smartinvoice}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ['CMD-SHELL', 'mysqladmin ping -h 127.0.0.1 -u root -p"$$MYSQL_ROOT_PASSWORD" --silent']
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
 
 volumes:
-  invoice_data:
-  mysql_data:
+  backend-data:
+  mysql-data:

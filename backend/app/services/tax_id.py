@@ -46,7 +46,7 @@ def compute_cif_control(org_letter: str, digits7: str) -> tuple[str, str]:
     """Return the (digit, letter) control characters of a CIF; which one applies depends on the entity type."""
     if len(digits7) != 7 or not digits7.isdigit():
         raise ValueError("digits7 must contain exactly 7 digits")
-    if org_letter.upper() not in CIF_ORG_LETTERS:
+    if len(org_letter) != 1 or org_letter.upper() not in CIF_ORG_LETTERS:
         raise ValueError(f"Invalid CIF organisation letter: {org_letter!r}")
     even_sum = sum(int(d) for d in digits7[1::2])
     odd_sum = sum(sum(divmod(int(d) * 2, 10)) for d in digits7[0::2])
