@@ -1,0 +1,61 @@
+# SmartInvoice-FACe Auditor - orquestación local con Docker Compose.
+#
+# MODO POR DEFECTO (SQLite, sin servicios externos):
+#   docker compose up --build
+#   API y documentación interactiva en http://localhost:8000/docs
+#
+# EJECUCIÓN CON MYSQL:
+#   1. Copia backend/.env.example a backend/.env y define la URL de MySQL usando
+#      el nombre del servicio de Compose como host (no "localhost", que dentro del
+#      contenedor del backend apunta a sí mismo):
+#        DATABASE_URL=mysql+pymysql://smartinvoice:smartinvoice@mysql:3306/smartinvoice?charset=utf8mb4
+#   2. Levanta el servicio mysql activando su perfil:
+#        docker compose --profile mysql up --build -d
+#      El backend espera a que MySQL supere su healthcheck antes de arrancar.
+#   3. Para parar los servicios: docker compose --profile mysql down
+#      (añade -v para borrar también los volúmenes de datos; es irreversible).
+#
+# Para ejecutar el backend en local con MySQL (sin Docker) usa en backend/.env el host
+# "localhost" y el puerto publicado 3306 del servicio mysql.
+#
+# Los datos de SQLite y las facturas subidas se guardan en el volumen "invoice_data".
+# Las variables de backend/.env se cargan si el fichero existe.
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      - invoice_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+        required: false
+
+  mysql:
+    image: mysql:8.4
+    profiles: ["mysql"]
+    # Credenciales de desarrollo local. No usar en producción.
+    environment:
+      MYSQL_ROOT_PASSWORD: smartinvoice-root
+      MYSQL_DATABASE: smartinvoice
+      MYSQL_USER: smartinvoice
+      MYSQL_PASSWORD: smartinvoice
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  invoice_data:
+  mysql_data:
