@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, contains_eager, joinedload, selectinload
 from app.core.config import Settings
 from app.core.errors import ConflictError, InvalidInputError, NotFoundError
 from app.models import (
+    AuditStatus,
     ExtractionMethod,
     Invoice,
     InvoiceLine,
@@ -115,6 +116,9 @@ def _clip(value: str | None, length: int) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned[:length] if cleaned else None
+
+
+ERROR_STATUSES = (AuditStatus.DISCREPANCY, AuditStatus.DUPLICATE)
 
 
 def _like_pattern(term: str) -> str:
@@ -416,8 +420,20 @@ def apply_invoice_update(db: Session, invoice: Invoice, payload: InvoiceUpdate) 
         invoice.lines.clear()
         db.flush()  # delete old rows first: (invoice_id, line_number) is unique
         invoice.lines.extend(new_lines)
+    if fields:
+        invoice.facturae_exported_at = None
     db.flush()
     return invoice
+
+
+def mark_exported(db: Session, invoice: Invoice) -> None:
+    invoice.facturae_exported_at = datetime.now(UTC)
+    invoice.facturae_export_count = (invoice.facturae_export_count or 0) + 1
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 # --------------------------------------------------------------------------- Loading
@@ -475,6 +491,12 @@ def _apply_filters(statement: Select[Any], filters: InvoiceFilters) -> Select[An
         statement = statement.where(Invoice.total_amount >= filters.min_total)
     if filters.max_total is not None:
         statement = statement.where(Invoice.total_amount <= filters.max_total)
+    if filters.has_errors is not None:
+        error_condition = Invoice.audit_status.in_(ERROR_STATUSES)
+        statement = statement.where(error_condition if filters.has_errors else ~error_condition)
+    if filters.exported is not None:
+        exported_condition = Invoice.facturae_exported_at.is_not(None)
+        statement = statement.where(exported_condition if filters.exported else ~exported_condition)
     if filters.extraction_method is not None:
         statement = statement.where(Invoice.extraction_method == filters.extraction_method)
     if filters.search and filters.search.strip():
@@ -482,6 +504,9 @@ def _apply_filters(statement: Select[Any], filters: InvoiceFilters) -> Select[An
         statement = statement.where(
             or_(
                 Invoice.invoice_number.ilike(pattern, escape="\\"),
+                # Series and number as displayed together, e.g. "ARQ-26/0033".
+                (func.coalesce(Invoice.invoice_series, "") + "/" + Invoice.invoice_number).ilike(pattern, escape="\\"),
+                (func.coalesce(Invoice.invoice_series, "") + "-" + Invoice.invoice_number).ilike(pattern, escape="\\"),
                 Supplier.name.ilike(pattern, escape="\\"),
                 Invoice.supplier_tax_id.ilike(pattern, escape="\\"),
             )

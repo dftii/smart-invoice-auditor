@@ -7,7 +7,7 @@ requires changing that variable (e.g. mysql+pymysql://user:pass@host:3306/db).
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -69,4 +69,39 @@ def init_db(bind: Engine | None = None) -> None:
     # Import models so they register on Base.metadata before create_all.
     from app import models  # noqa: F401
 
-    Base.metadata.create_all(bind=bind or engine)
+    target = bind or engine
+    Base.metadata.create_all(bind=target)
+    add_missing_columns(target)
+
+
+def add_missing_columns(bind: Engine) -> list[str]:
+    """Add columns introduced after a table was created (nullable or with a server default).
+
+    create_all never alters existing tables, so databases created by an older version
+    would otherwise fail on the new columns. Returns the "table.column" names added.
+    """
+    added: list[str] = []
+    with bind.begin() as connection:
+        # Reflect through the same connection that alters, so both see one consistent schema.
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                if not column.nullable and column.server_default is None:
+                    raise RuntimeError(
+                        f"Cannot add NOT NULL column {table.name}.{column.name} without a server default"
+                    )
+                column_type = column.type.compile(dialect=bind.dialect)
+                ddl = f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column_type}"
+                if column.server_default is not None:
+                    ddl += f" DEFAULT {column.server_default.arg}"
+                if not column.nullable:
+                    ddl += " NOT NULL"
+                connection.execute(text(ddl))
+                added.append(f"{table.name}.{column.name}")
+    return added

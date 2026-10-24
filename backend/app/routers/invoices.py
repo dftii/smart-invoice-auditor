@@ -293,6 +293,7 @@ def download_facturae(
     invoice = service.get_invoice(db, invoice_id)
     exporter = FacturaeExporter(settings)
     xml = exporter.to_xml(invoice, sign=sign)
+    service.mark_exported(db, invoice)
     return Response(content=xml, media_type="application/xml", headers=_attachment(exporter.filename_for(invoice)))
 
 

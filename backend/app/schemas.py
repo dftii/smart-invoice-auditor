@@ -214,6 +214,8 @@ class InvoiceSummary(ORMModel):
     extraction_confidence: float | None = None
     source_filename: str | None = None
     last_audited_at: datetime | None = None
+    facturae_exported_at: datetime | None = None
+    facturae_export_count: int = 0
     created_at: datetime
 
 
@@ -237,6 +239,8 @@ class InvoiceRead(InvoiceBuyerFields, ORMModel):
     warning_count: int
     last_audited_at: datetime | None = None
     last_audit_run_id: str | None = None
+    facturae_exported_at: datetime | None = None
+    facturae_export_count: int = 0
     extraction_method: ExtractionMethod
     extraction_confidence: float | None = None
     source_filename: str | None = None
@@ -271,6 +275,8 @@ class InvoiceFilters(BaseModel):
     min_total: Decimal | None = None
     max_total: Decimal | None = None
     extraction_method: ExtractionMethod | None = None
+    exported: bool | None = Field(default=None, description="true = Facturae XML already generated")
+    has_errors: bool | None = Field(default=None, description="true = DISCREPANCY or DUPLICATE")
     search: str | None = Field(default=None, description="Matches invoice number, supplier name or tax id")
     sort_by: SortField = "issue_date"
     sort_dir: Literal["asc", "desc"] = "desc"
@@ -422,6 +428,9 @@ class DashboardStats(BaseModel):
     total_irpf: DecimalStr
     total_amount: DecimalStr
     validation_rate: float = Field(description="Percentage of invoices in VALIDATED status (0-100)")
+    invoices_with_errors: int = Field(description="Invoices in DISCREPANCY or DUPLICATE status")
+    exported_to_face: int = Field(description="Invoices whose Facturae XML has been generated")
+    ready_for_face: int = Field(description="VALIDATED invoices with no warnings, not exported yet")
     by_status: list[StatusCount]
     monthly: list[MonthlyTotal]
     top_suppliers: list[TopSupplier]

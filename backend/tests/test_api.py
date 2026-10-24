@@ -2398,3 +2398,83 @@ def test_supplier_404s(client):
     assert response.status_code == 404
     assert "no encontrado" in response.json()["detail"]
     assert client.get(f"{API}/suppliers/abc").status_code == 422
+
+
+# --------------------------------------------------------------------------- Facturae export tracking
+
+
+def test_new_invoice_is_not_exported(client):
+    created = create_invoice(client)
+    assert created["facturae_exported_at"] is None
+    assert created["facturae_export_count"] == 0
+
+
+def test_facturae_download_records_the_export(client):
+    created = create_invoice(client)
+    for expected_count in (1, 2):
+        assert client.get(f"{API}/invoices/{created['id']}/facturae", params={"sign": False}).status_code == 200
+        detail = client.get(f"{API}/invoices/{created['id']}").json()
+        assert detail["facturae_export_count"] == expected_count
+        assert detail["facturae_exported_at"] is not None
+        assert detail["facturae_exported_at"].endswith("Z") or detail["facturae_exported_at"].endswith("+00:00")
+
+
+def test_rejected_facturae_download_is_not_recorded(client):
+    created = create_invoice(client, tax_base="999.00")
+    assert client.get(f"{API}/invoices/{created['id']}/facturae", params={"sign": False}).status_code == 409
+    detail = client.get(f"{API}/invoices/{created['id']}").json()
+    assert detail["facturae_export_count"] == 0
+    assert detail["facturae_exported_at"] is None
+
+
+def test_editing_an_exported_invoice_clears_the_export_date(client):
+    created = create_invoice(client)
+    client.get(f"{API}/invoices/{created['id']}/facturae", params={"sign": False})
+    patched = client.patch(f"{API}/invoices/{created['id']}", json={"notes": "Revisada"}).json()
+    assert patched["facturae_exported_at"] is None
+    assert patched["facturae_export_count"] == 1
+
+
+def test_exported_filter(client):
+    exported = create_invoice(client, "E-1")
+    pending = create_invoice(client, "E-2")
+    client.get(f"{API}/invoices/{exported['id']}/facturae", params={"sign": False})
+
+    only_exported = client.get(f"{API}/invoices", params={"exported": True}).json()
+    assert [item["id"] for item in only_exported["items"]] == [exported["id"]]
+    assert only_exported["items"][0]["facturae_export_count"] == 1
+    not_exported = client.get(f"{API}/invoices", params={"exported": False}).json()
+    assert [item["id"] for item in not_exported["items"]] == [pending["id"]]
+
+
+def test_dashboard_face_kpis(client):
+    exported = create_invoice(client, "K-1")
+    create_invoice(client, "K-2")
+    create_invoice(client, "K-3", tax_base="1.00")
+    create_invoice(client, "K-2")
+    client.get(f"{API}/invoices/{exported['id']}/facturae", params={"sign": False})
+
+    stats = client.get(f"{API}/stats/dashboard").json()
+    assert stats["exported_to_face"] == 1
+    assert stats["ready_for_face"] == 1
+    assert stats["invoices_with_errors"] == 2
+
+
+@pytest.mark.parametrize("term", ["ARQ-26/0033", "arq-26-0033", "26/0033", "0033"])
+def test_search_matches_series_and_number_as_displayed(client, term):
+    created = create_invoice(client, "0033", invoice_series="ARQ-26")
+    create_invoice(client, "0034", invoice_series="ARQ-26")
+    found = client.get(f"{API}/invoices", params={"search": term}).json()
+    assert [item["id"] for item in found["items"]] == [created["id"]]
+
+
+def test_has_errors_filter_matches_the_dashboard_kpi(client):
+    create_invoice(client, "H-1")
+    discrepancy = create_invoice(client, "H-2", tax_base="1.00")
+    duplicate = create_invoice(client, "H-1")
+    stats = client.get(f"{API}/stats/dashboard").json()
+    with_errors = client.get(f"{API}/invoices", params={"has_errors": True, "sort_by": "created_at", "sort_dir": "asc"})
+    assert [item["id"] for item in with_errors.json()["items"]] == [discrepancy["id"], duplicate["id"]]
+    assert with_errors.json()["total"] == stats["invoices_with_errors"]
+    without = client.get(f"{API}/invoices", params={"has_errors": False}).json()
+    assert without["total"] == 1

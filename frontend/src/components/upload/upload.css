@@ -1,0 +1,26 @@
+@keyframes upload-shimmer {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+
+.upload-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.upload-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.85), transparent);
+  animation: upload-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes upload-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.upload-indeterminate {
+  animation: upload-indeterminate 1.4s ease-in-out infinite;
+}

@@ -441,3 +441,21 @@ def test_main_rolls_back_everything_on_error(database_url, monkeypatch, capsys):
     assert seed_script.main(["--database-url", database_url]) == 1
     assert "Se han revertido todos los cambios" in capsys.readouterr().err
     assert counts(database_url) == (0, 0, 0)
+
+
+def test_init_db_adds_columns_missing_from_an_older_schema(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.db.database import add_missing_columns, init_db
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'old.db').as_posix()}")
+    init_db(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE invoices DROP COLUMN facturae_exported_at"))
+        connection.execute(text("ALTER TABLE invoices DROP COLUMN facturae_export_count"))
+
+    assert sorted(add_missing_columns(engine)) == ["invoices.facturae_export_count", "invoices.facturae_exported_at"]
+    columns = {column["name"] for column in inspect(engine).get_columns("invoices")}
+    assert {"facturae_exported_at", "facturae_export_count"} <= columns
+    assert add_missing_columns(engine) == []
+    engine.dispose()

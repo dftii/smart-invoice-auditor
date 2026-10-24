@@ -181,6 +181,10 @@ class Invoice(TimestampMixin, Base):
     last_audited_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_audit_run_id: Mapped[str | None] = mapped_column(String(36))
 
+    # Last time the Facturae XML was generated; cleared when the invoice is edited afterwards.
+    facturae_exported_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    facturae_export_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
     extraction_method: Mapped[ExtractionMethod] = mapped_column(
         enum_column(ExtractionMethod, 10), default=ExtractionMethod.MANUAL, nullable=False
     )

@@ -2,7 +2,14 @@
 #
 # MODO POR DEFECTO (SQLite, sin servicios externos):
 #   docker compose up --build
+#   Interfaz web en http://localhost:8080
 #   API y documentación interactiva en http://localhost:8000/docs
+#
+# FRONTEND (servicio "frontend", puerto 8080):
+#   nginx sirve la SPA compilada y reenvía /api/ y /health al backend por la red interna de Compose.
+#   El navegador solo necesita el puerto 8080 para la interfaz. El frontend arranca cuando el
+#   backend supera su healthcheck, porque nginx resuelve el host "backend" al iniciarse.
+#   Para desarrollo con recarga en caliente usa "npm run dev" en frontend/ (ver README).
 #
 # CONFIGURACIÓN:
 #   - backend/.env (opcional) se pasa al contenedor del backend como variables de entorno.
@@ -57,6 +64,15 @@ services:
       mysql:
         condition: service_healthy
         required: false
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
 
   seed:
     build: ./backend

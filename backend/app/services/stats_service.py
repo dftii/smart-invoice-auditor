@@ -16,6 +16,7 @@ from app.schemas import (
     VatBreakdown,
 )
 from app.services.extractor import get_extractor
+from app.services.invoice_service import ERROR_STATUSES
 
 TOP_SUPPLIERS_LIMIT = 5
 TOP_RULES_LIMIT = 10
@@ -119,6 +120,25 @@ def compute_dashboard_stats(db: Session) -> DashboardStats:
     ).one()
     validated = db.scalar(select(func.count(Invoice.id)).where(Invoice.audit_status == AuditStatus.VALIDATED)) or 0
     suppliers = db.scalar(select(func.count(Supplier.id))) or 0
+    with_errors = (
+        db.scalar(
+            select(func.count(Invoice.id)).where(
+                Invoice.audit_status.in_(ERROR_STATUSES)
+            )
+        )
+        or 0
+    )
+    exported = db.scalar(select(func.count(Invoice.id)).where(Invoice.facturae_exported_at.is_not(None))) or 0
+    ready = (
+        db.scalar(
+            select(func.count(Invoice.id)).where(
+                Invoice.audit_status == AuditStatus.VALIDATED,
+                Invoice.warning_count == 0,
+                Invoice.facturae_exported_at.is_(None),
+            )
+        )
+        or 0
+    )
     rate = float((Decimal(validated) * 100 / Decimal(count)).quantize(CENT, rounding=ROUND_HALF_UP)) if count else 0.0
 
     return DashboardStats(
@@ -129,6 +149,9 @@ def compute_dashboard_stats(db: Session) -> DashboardStats:
         total_irpf=_dec(irpf),
         total_amount=_dec(total),
         validation_rate=rate,
+        invoices_with_errors=with_errors,
+        exported_to_face=exported,
+        ready_for_face=ready,
         by_status=_by_status(db),
         monthly=_monthly(db),
         top_suppliers=_top_suppliers(db),

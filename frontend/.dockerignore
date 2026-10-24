@@ -1,0 +1,22 @@
+# Contexto de build del frontend: el build de Vite solo necesita el código fuente y su configuración.
+
+# Dependencias y salidas de compilación: se instalan y generan dentro de la imagen
+node_modules
+dist
+dist-ssr
+
+# Secretos y configuración local: nunca dentro de la imagen
+.env
+.env.*
+
+# Control de versiones, IDE y logs
+.git
+.gitignore
+.vscode
+.idea
+*.log
+
+# Ficheros que no participan en la build
+Dockerfile
+.dockerignore
+README.md
