@@ -1,4 +1,5 @@
-import type { AuditStatus, RuleCode, Severity } from '../types/api'
+import type { AuditStatus, RuleCode } from '../types/api'
+import { toNumber } from './decimal'
 
 const eurFormatter = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' })
 const numberFormatter = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 4 })
@@ -6,12 +7,6 @@ const percentFormatter = new Intl.NumberFormat('es-ES', { maximumFractionDigits:
 const dateFormatter = new Intl.DateTimeFormat('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' })
 const dateTimeFormatter = new Intl.DateTimeFormat('es-ES', { dateStyle: 'short', timeStyle: 'short' })
 const monthFormatter = new Intl.DateTimeFormat('es-ES', { month: 'short', year: '2-digit' })
-
-export function toNumber(value: string | number | null | undefined): number {
-  if (value === null || value === undefined || value === '') return 0
-  const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
 
 export function formatEur(value: string | number | null | undefined): string {
   return eurFormatter.format(toNumber(value))
@@ -51,35 +46,11 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1).replace('.', ',')} MB`
 }
 
-/** Cent-exact arithmetic on decimal strings: work in integer cents to avoid float drift. */
-export function toCents(value: string | number | null | undefined): number {
-  return Math.round(toNumber(value) * 100)
-}
-
-export function centsToDecimal(cents: number): string {
-  const sign = cents < 0 ? '-' : ''
-  const absolute = Math.abs(cents)
-  return `${sign}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, '0')}`
-}
-
-/** ROUND_HALF_UP to 2 decimals, matching the backend auditor. */
-export function roundHalfUp(value: number): number {
-  const scaled = Math.abs(value) * 100
-  const rounded = Math.floor(scaled + 0.5 + 1e-9) / 100
-  return value < 0 ? -rounded : rounded
-}
-
 export const STATUS_LABELS: Record<AuditStatus, string> = {
   PENDING: 'Pendiente',
   VALIDATED: 'Cuadra',
   DISCREPANCY: 'Discrepancia',
   DUPLICATE: 'Duplicada',
-}
-
-export const SEVERITY_LABELS: Record<Severity, string> = {
-  INFO: 'Correcto',
-  WARNING: 'Aviso',
-  ERROR: 'Error',
 }
 
 export const RULE_LABELS: Record<RuleCode, string> = {

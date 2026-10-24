@@ -371,6 +371,16 @@ def test_main_seeds_an_empty_database_and_prints_a_spanish_summary(database_url,
     assert invoices == 25 and 10 <= suppliers <= 12 and logs > 25
 
 
+def test_main_without_database_url_uses_the_default_engine(capsys):
+    """The default path goes through get_engine(); conftest points DATABASE_URL at a scratch database."""
+    from app.db.database import get_engine
+
+    assert seed_script.main([]) == 0
+    assert str(get_engine().url.database) in capsys.readouterr().out
+    assert "smartinvoice.db" not in str(get_engine().url)
+    assert seed_script.main([]) == 0  # second run is a no-op
+
+
 def test_main_is_idempotent_without_reset(database_url, capsys):
     assert seed_script.main(["--database-url", database_url]) == 0
     before = counts(database_url)

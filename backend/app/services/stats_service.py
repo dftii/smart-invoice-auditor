@@ -1,11 +1,12 @@
 """Dashboard aggregates computed in SQL (portable across SQLite and MySQL)."""
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import extract, func, select
 from sqlalchemy.orm import Session
 
+from app.core.money import round_money
 from app.models import AuditStatus, Invoice, InvoiceLine, Supplier, ValidationLog
 from app.schemas import (
     DashboardStats,
@@ -20,11 +21,10 @@ from app.services.invoice_service import ERROR_STATUSES
 
 TOP_SUPPLIERS_LIMIT = 5
 TOP_RULES_LIMIT = 10
-CENT = Decimal("0.01")
 
 
 def _dec(value: Any) -> Decimal:
-    return Decimal(value if value is not None else 0).quantize(CENT, rounding=ROUND_HALF_UP)
+    return round_money(Decimal(value if value is not None else 0))
 
 
 def _by_status(db: Session) -> list[StatusCount]:
@@ -139,7 +139,7 @@ def compute_dashboard_stats(db: Session) -> DashboardStats:
         )
         or 0
     )
-    rate = float((Decimal(validated) * 100 / Decimal(count)).quantize(CENT, rounding=ROUND_HALF_UP)) if count else 0.0
+    rate = float(round_money(Decimal(validated) * 100 / Decimal(count))) if count else 0.0
 
     return DashboardStats(
         total_invoices=count,

@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from 'react'
 import { CircleAlert, CircleCheck, ExternalLink, ShieldCheck, ShieldX, X } from 'lucide-react'
 import { api } from '../../services/api'
+import { useToast } from '../ui/toastContext'
+import { SyntheticChip } from '../ui/SyntheticChip'
 import { formatDate, formatDateTime } from '../../lib/format'
 import type { InvoiceDetail } from '../../types/api'
 import { StatusBadge } from '../ui/StatusBadge'
-import { fullNumber } from './draft'
+import { invoiceLabel } from '../../lib/invoice'
 
 interface TopBarProps {
   invoice: InvoiceDetail | null
@@ -18,7 +20,7 @@ export function InspectorTopBar({ invoice, onClose }: TopBarProps) {
       <div className="min-w-0 flex-1">
         <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">Inspección de Auditoría</p>
         <h2 id="inspector-title" className="mt-0.5 truncate text-lg font-semibold text-slate-900">
-          {invoice ? `Factura ${fullNumber(invoice)}` : 'Cargando factura…'}
+          {invoice ? `Factura ${invoiceLabel(invoice)}` : 'Cargando factura…'}
         </h2>
       </div>
       {invoice && <StatusBadge status={invoice.audit_status} exportedAt={invoice.facturae_exported_at} size="md" />}
@@ -35,6 +37,9 @@ export function InspectorTopBar({ invoice, onClose }: TopBarProps) {
   )
 }
 
+const ORIGINAL_LINK_CLASS =
+  'inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50'
+
 function Meta({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
@@ -46,7 +51,14 @@ function Meta({ label, children }: { label: string; children: ReactNode }) {
 
 /** Supplier, dates and audit summary shown at the top of the scrolling body. */
 export function InvoiceMeta({ invoice }: { invoice: InvoiceDetail }) {
+  const toast = useToast()
   const [expanded, setExpanded] = useState(false)
+  const originalUrl = api.originalFileUrl(invoice.id)
+  const openOriginal = () => {
+    api.openOriginalFile(invoice.id).catch((reason: unknown) => {
+      toast.error('No se pudo abrir el documento', reason instanceof Error ? reason.message : undefined)
+    })
+  }
   const { supplier } = invoice
   const checked = invoice.last_audited_at !== null
   return (
@@ -69,17 +81,18 @@ export function InvoiceMeta({ invoice }: { invoice: InvoiceDetail }) {
             )}
           </p>
         </div>
-        {invoice.source_filename && (
-          <a
-            href={api.originalFileUrl(invoice.id)}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50"
-          >
-            <ExternalLink aria-hidden className="size-4" />
-            Ver documento original
-          </a>
-        )}
+        {invoice.source_filename &&
+          (originalUrl ? (
+            <a href={originalUrl} target="_blank" rel="noreferrer" className={ORIGINAL_LINK_CLASS}>
+              <ExternalLink aria-hidden className="size-4" />
+              Ver documento original
+            </a>
+          ) : (
+            <button type="button" onClick={openOriginal} className={ORIGINAL_LINK_CLASS}>
+              <ExternalLink aria-hidden className="size-4" />
+              Ver documento original
+            </button>
+          ))}
       </div>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
@@ -97,6 +110,7 @@ export function InvoiceMeta({ invoice }: { invoice: InvoiceDetail }) {
         <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-800 ring-1 ring-inset ring-amber-600/20">
           {invoice.warning_count} {invoice.warning_count === 1 ? 'aviso' : 'avisos'}
         </span>
+        {invoice.is_synthetic && <SyntheticChip className="px-2 py-1" />}
         {invoice.facturae_exported_at && (
           <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20">
             <CircleCheck aria-hidden className="size-3.5" />

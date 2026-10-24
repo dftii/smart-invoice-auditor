@@ -5,7 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.services.extractor import ExtractionError
+from app.services.extraction import ExtractionError
 from app.services.face_exporter import FacturaeExportError
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,16 @@ class AppError(Exception):
     def __init__(self, detail: str | None = None) -> None:
         self.detail = detail or self.default_detail
         super().__init__(self.detail)
+
+
+class UnauthorizedError(AppError):
+    status_code = 401
+    default_detail = "Clave de API ausente o no válida"
+
+
+class ForbiddenError(AppError):
+    status_code = 403
+    default_detail = "Operación no permitida"
 
 
 class NotFoundError(AppError):

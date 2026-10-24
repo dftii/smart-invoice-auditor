@@ -1,6 +1,7 @@
 import { ListChecks } from 'lucide-react'
 import { cn } from '../../lib/cn'
-import { centsToDecimal, formatEur, formatNumber, formatPercent } from '../../lib/format'
+import { formatEur, formatNumber, formatPercent } from '../../lib/format'
+import { centsToDecimal } from '../../lib/decimal'
 import type { InvoiceLine } from '../../types/api'
 import { analyzeLine, IRPF_RATE_OPTIONS, VAT_RATE_OPTIONS } from './reconcile'
 

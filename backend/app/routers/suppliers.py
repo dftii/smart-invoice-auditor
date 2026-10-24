@@ -2,19 +2,13 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Query, status
 
-from app.db.database import get_db
-from app.schemas import InvoiceFilters, InvoiceSummary, Page, SupplierCreate, SupplierUpdate, SupplierWithStats
+from app.routers.params import DbSession, FilterParams, PageParam, PageSizeParam, SupplierIdPath
+from app.schemas import InvoiceSummary, Page, SupplierCreate, SupplierUpdate, SupplierWithStats
 from app.services import invoice_service as service
 
 router = APIRouter(prefix="/suppliers", tags=["Proveedores"])
-
-DbSession = Annotated[Session, Depends(get_db)]
-FilterParams = Annotated[InvoiceFilters, Query()]
-PageParam = Annotated[int, Query(ge=1, description="Número de página (empieza en 1)")]
-PageSizeParam = Annotated[int, Query(ge=1, le=200, description="Elementos por página")]
 
 NOT_FOUND_RESPONSE = {404: {"description": "Proveedor no encontrado"}}
 
@@ -52,7 +46,7 @@ def create_supplier(payload: SupplierCreate, db: DbSession) -> SupplierWithStats
     summary="Detalle de un proveedor",
     responses=NOT_FOUND_RESPONSE,
 )
-def get_supplier(supplier_id: int, db: DbSession) -> SupplierWithStats:
+def get_supplier(supplier_id: SupplierIdPath, db: DbSession) -> SupplierWithStats:
     return service.get_supplier_with_stats(db, supplier_id)
 
 
@@ -62,7 +56,7 @@ def get_supplier(supplier_id: int, db: DbSession) -> SupplierWithStats:
     summary="Actualizar los datos de un proveedor",
     responses=NOT_FOUND_RESPONSE,
 )
-def update_supplier(supplier_id: int, payload: SupplierUpdate, db: DbSession) -> SupplierWithStats:
+def update_supplier(supplier_id: SupplierIdPath, payload: SupplierUpdate, db: DbSession) -> SupplierWithStats:
     try:
         supplier = service.get_supplier(db, supplier_id)
         service.update_supplier(db, supplier, payload)
@@ -80,7 +74,7 @@ def update_supplier(supplier_id: int, payload: SupplierUpdate, db: DbSession) ->
     responses=NOT_FOUND_RESPONSE,
 )
 def list_supplier_invoices(
-    supplier_id: int,
+    supplier_id: SupplierIdPath,
     db: DbSession,
     filters: FilterParams,
     page: PageParam = 1,

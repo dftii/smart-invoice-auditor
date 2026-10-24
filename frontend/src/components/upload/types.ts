@@ -10,8 +10,10 @@ export type UploadPhase =
   | { kind: 'processing'; step: ProcessingStep; result: UploadResponse | null }
   | { kind: 'revealing'; result: UploadResponse; revealed: number }
   | { kind: 'done'; result: UploadResponse }
-  | { kind: 'error'; message: string; failedStep: number; retryable: boolean }
-  | { kind: 'cancelled'; failedStep: number }
+  /** `maybeCreated`: the request had been fully sent, so the server may have stored the invoice anyway. */
+  | { kind: 'error'; message: string; failedStep: number; retryable: boolean; maybeCreated?: boolean }
+  /** `maybeCreated`: cancelled while the server was processing, so it may have stored the invoice anyway. */
+  | { kind: 'cancelled'; failedStep: number; maybeCreated: boolean }
 
 export interface UploadItem {
   id: number

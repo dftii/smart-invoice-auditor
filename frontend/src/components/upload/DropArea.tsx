@@ -1,7 +1,7 @@
 import { CloudUpload, Sparkles } from 'lucide-react'
-import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import { cn } from '../../lib/cn'
-import { ACCEPT_ATTRIBUTE, MAX_UPLOAD_MB, nameClipboardFile } from './validation'
+import { ACCEPT_ATTRIBUTE } from './validation'
 
 const MODE_TEXT = {
   AI: 'Modo IA: extracción con Claude',
@@ -10,10 +10,11 @@ const MODE_TEXT = {
 
 interface DropAreaProps {
   extractionMode: 'AI' | 'DEMO' | null
+  maxUploadMb: number
   onFiles: (files: File[]) => void
 }
 
-export function DropArea({ extractionMode, onFiles }: DropAreaProps) {
+export function DropArea({ extractionMode, maxUploadMb, onFiles }: DropAreaProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -43,13 +44,6 @@ export function DropArea({ extractionMode, onFiles }: DropAreaProps) {
     onFiles(Array.from(event.dataTransfer.files))
   }
 
-  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
-    if (images.length === 0) return
-    event.preventDefault()
-    onFiles(images.map(nameClipboardFile))
-  }
-
   return (
     <div
       role="button"
@@ -61,7 +55,6 @@ export function DropArea({ extractionMode, onFiles }: DropAreaProps) {
       onDragEnter={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      onPaste={handlePaste}
       className={cn(
         'group flex cursor-pointer flex-col items-center gap-3 rounded-2xl border-2 border-dashed px-4 py-10 text-center transition-all duration-200 sm:py-12',
         dragging
@@ -83,7 +76,7 @@ export function DropArea({ extractionMode, onFiles }: DropAreaProps) {
           {dragging ? 'Suelta las facturas para subirlas' : 'Arrastra tus facturas (PDF o imagen) o haz clic para seleccionarlas'}
         </p>
         <p className="text-sm text-slate-500">
-          PDF, PNG, JPG o WEBP · máx. {MAX_UPLOAD_MB} MB por archivo · también puedes pegar una imagen con Ctrl+V
+          PDF, PNG, JPG o WEBP · máx. {maxUploadMb} MB por archivo · también puedes pegar una imagen con Ctrl+V
         </p>
       </div>
       {extractionMode && (

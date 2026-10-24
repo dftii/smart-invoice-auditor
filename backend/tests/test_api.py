@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from lxml import etree
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -169,10 +170,8 @@ class FakeExtractor:
 
 @pytest.fixture()
 def fake_extractor(client):
-    from app.main import app
-
     fake = FakeExtractor()
-    app.dependency_overrides[get_extractor] = lambda: fake
+    client.app.dependency_overrides[get_extractor] = lambda: fake
     return fake
 
 
@@ -221,19 +220,17 @@ def test_health(client):
     assert body["status"] == "ok"
     assert body["app"] == get_settings().app_name
     assert body["version"] == get_settings().app_version
-    assert body["database"] == "sqlite"
+    assert body["database"] == "ok"
     assert body["extraction_mode"] == "DEMO"  # conftest removes the API key
 
 
 def test_health_reports_unavailable_database(client):
     from app.db.database import get_db
-    from app.main import app
-
     class BrokenSession:
         def execute(self, *_args, **_kwargs):
             raise OperationalError("SELECT 1", {}, Exception("disco lleno"))
 
-    app.dependency_overrides[get_db] = lambda: BrokenSession()
+    client.app.dependency_overrides[get_db] = lambda: BrokenSession()
     response = client.get("/health")
     assert response.status_code == 503
     assert response.json() == {"detail": "Base de datos no disponible"}
@@ -1259,7 +1256,7 @@ SAMPLE_OUTCOMES = {
     "04_factura_error_calculo_linea.pdf": ("DISCREPANCY", {"LINE_BASE"}, 1),
     "05_factura_cif_proveedor_invalido.pdf": ("DISCREPANCY", {"SUPPLIER_TAX_ID"}, 1),
     "06_factura_face_dir3.pdf": ("VALIDATED", set(), 1),
-    "07_factura_imagen_demo.png": ("VALIDATED", set(), 1),
+    "07_factura_imagen_demo.png": ("DISCREPANCY", {"SYNTHETIC_DATA"}, 1),  # images are never really read
 }
 
 
@@ -1773,9 +1770,19 @@ def test_facturae_becomes_available_after_fixing_a_cent_error(client):
     assert root.findtext("Invoices/Invoice/InvoiceTotals/InvoiceTotal") == "302.50"
 
 
-def test_facturae_signing_requires_a_certificate(client):
+def test_facturae_signing_is_refused_without_an_api_key(client):
     created = create_invoice(client)
     response = client.get(f"{API}/invoices/{created['id']}/facturae", params={"sign": True})
+    assert response.status_code == 403
+    assert "API_KEY" in response.json()["detail"]
+
+
+def test_facturae_signing_requires_a_certificate(client, monkeypatch):
+    created = create_invoice(client)
+    monkeypatch.setattr(get_settings(), "api_key", SecretStr("clave-de-prueba"))
+    response = client.get(
+        f"{API}/invoices/{created['id']}/facturae", params={"sign": True}, headers={"X-API-Key": "clave-de-prueba"}
+    )
     assert response.status_code == 409
     assert "no hay certificado configurado" in response.json()["detail"]
 

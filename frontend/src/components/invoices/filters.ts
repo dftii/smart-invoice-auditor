@@ -1,3 +1,4 @@
+import { decToString, parseDecimal } from '../../lib/decimal'
 import type { AuditStatus, InvoiceFilters, SortDir, SortField } from '../../types/api'
 
 export type StatusPreset = 'ALL' | AuditStatus | 'ERRORS' | 'EXPORTED'
@@ -45,12 +46,10 @@ export const SORT_OPTIONS: { by: SortField; dir: SortDir; label: string }[] = [
   { by: 'audit_status', dir: 'asc', label: 'Estado' },
 ]
 
-/** Accepts "1.234,5" / "1234.50" while typing; returns a plain decimal string or '' when unusable. */
+/** Non-negative amount typed by a person ("1.234,5", "1234.50", "1.500" = 1500) as a plain decimal string, or '' when unusable. */
 export function normalizeAmount(raw: string): string {
-  const text = raw.trim().replace(/\s/g, '')
-  if (!text) return ''
-  const normalized = text.includes(',') ? text.replace(/\./g, '').replace(',', '.') : text
-  return /^\d+(\.\d+)?$/.test(normalized) ? normalized : ''
+  const parsed = parseDecimal(raw, 'es')
+  return parsed === null || parsed.n < 0n ? '' : decToString(parsed)
 }
 
 export function toApiFilters(values: FilterValues, sort: SortState): InvoiceFilters {

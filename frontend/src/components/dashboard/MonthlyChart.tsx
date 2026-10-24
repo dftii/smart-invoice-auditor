@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { MonthlyTotal } from '../../types/api'
-import { formatEur, formatMonth, toNumber } from '../../lib/format'
+import { formatEur, formatMonth } from '../../lib/format'
+import { toNumber } from '../../lib/decimal'
 import { useElementWidth } from '../../hooks/useElementWidth'
 import { formatCompactEur, lastMonths, niceTicks } from './chartMath'
 import { ChartCard } from './ChartCard'

@@ -20,7 +20,6 @@ from app.services.face_exporter import (
     SIGNATURE_POLICY_IDENTIFIER,
     FacturaeExporter,
     FacturaeExportError,
-    export_facturae,
     split_individual_name,
 )
 
@@ -73,6 +72,7 @@ def _invoice(supplier: Supplier, **overrides) -> Invoice:
         "operation_date": date(2024, 3, 10),
         "due_date": date(2024, 4, 14),
         "currency": "EUR",
+        "payment_iban": "ES9121000418450200051332",
         "supplier_tax_id": supplier.tax_id,
         "buyer_name": "Ayuntamiento de Valencia",
         "buyer_tax_id": "P4625200C",
@@ -182,7 +182,7 @@ def test_rejects_non_validated_invoice(invoice, status):
     with pytest.raises(FacturaeExportError, match="validadas"):
         FacturaeExporter(_settings()).build_tree(invoice)
     with pytest.raises(FacturaeExportError):
-        export_facturae(invoice, _settings())
+        FacturaeExporter(_settings()).to_xml(invoice)
 
 
 def test_root_namespace_and_version(invoice):
@@ -343,10 +343,11 @@ def test_dir3_centres_omitted_when_codes_missing(invoice):
     assert root.find("Parties/BuyerParty/AdministrativeCentres", NS) is None
 
 
-def test_payment_details_only_with_due_date(invoice):
+def test_payment_details_only_with_due_date_and_iban(invoice):
     root = FacturaeExporter(_settings()).build_tree(invoice)
     installment = _find(root, "Invoices/Invoice/PaymentDetails/Installment")
-    assert _children(installment) == ["InstallmentDueDate", "InstallmentAmount", "PaymentMeans"]
+    assert _children(installment) == ["InstallmentDueDate", "InstallmentAmount", "PaymentMeans", "AccountToBeCredited"]
+    assert _find(installment, "AccountToBeCredited/IBAN").text == "ES9121000418450200051332"
     assert _find(installment, "InstallmentDueDate").text == "2024-04-14"
     assert _find(installment, "InstallmentAmount").text == "271.60"
     assert _find(installment, "PaymentMeans").text == "04"
@@ -354,6 +355,53 @@ def test_payment_details_only_with_due_date(invoice):
     invoice.due_date = None
     root = FacturaeExporter(_settings()).build_tree(invoice)
     assert root.find("Invoices/Invoice/PaymentDetails", NS) is None
+
+
+def test_no_payment_details_without_iban(invoice):
+    """A credit transfer without the account to credit is invalid, so nothing is emitted."""
+    invoice.payment_iban = None
+    root = FacturaeExporter(_settings()).build_tree(invoice)
+    assert root.find("Invoices/Invoice/PaymentDetails", NS) is None
+
+
+def test_synthetic_invoice_is_never_exported(invoice):
+    invoice.is_synthetic = True
+    with pytest.raises(FacturaeExportError, match="sintéticos"):
+        FacturaeExporter(_settings()).build_tree(invoice)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("province", "Santa Cruz de Tenerife", "provincia"),
+        ("city", "C" * 51, "población"),
+        ("address", "A" * 81, "dirección"),
+    ],
+)
+def test_overlong_supplier_fields_are_rejected_not_truncated(invoice, field, value, expected):
+    setattr(invoice.supplier, field, value)
+    with pytest.raises(FacturaeExportError, match=expected) as error:
+        FacturaeExporter(_settings()).build_tree(invoice)
+    assert "emisor" in str(error.value)
+
+
+def test_length_constants_match_the_xsd():
+    """The limits used for the pre-export checks are the ones declared in the XSD."""
+    import re
+
+    from app.services import face_exporter
+
+    text = XSD_PATH.read_text(encoding="utf-8")
+    max_of = {
+        name: int(value)
+        for name, value in re.findall(r'<xs:simpleType name="(TextMax\d+Type)">\s*<xs:restriction[^>]*>\s*<xs:maxLength value="(\d+)"', text)
+    }
+    declared = dict(re.findall(r'<xs:element name="(Address|Town|Province|CorporateName|PostCodeAndTown)" type="(TextMax\d+Type)"', text))
+    assert max_of[declared["Address"]] == face_exporter.MAX_ADDRESS
+    assert max_of[declared["Town"]] == face_exporter.MAX_TOWN
+    assert max_of[declared["Province"]] == face_exporter.MAX_PROVINCE
+    assert max_of[declared["CorporateName"]] == face_exporter.MAX_CORPORATE_NAME
+    assert max_of[declared["PostCodeAndTown"]] == face_exporter.MAX_POST_CODE_AND_TOWN
 
 
 def test_no_irpf_section_without_withholding(db_session):
@@ -554,7 +602,7 @@ def test_sign_none_follows_certificate_setting(invoice, tmp_path):
     signed = FacturaeExporter(_settings(cert_path, CERT_PASSWORD)).to_xml(invoice)
     assert b"<ds:Signature" in signed
     assert b"Signature" not in FacturaeExporter(_settings(cert_path, CERT_PASSWORD)).to_xml(invoice, sign=False)
-    assert b"<ds:Signature" in export_facturae(invoice, _settings(cert_path, CERT_PASSWORD))
+    assert b"<ds:Signature" in FacturaeExporter(_settings(cert_path, CERT_PASSWORD)).to_xml(invoice)
 
 
 # ---------------------------------------------------------------- XSD validation

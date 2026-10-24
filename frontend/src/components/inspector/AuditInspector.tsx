@@ -1,31 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import { ArrowRight, CircleAlert, LoaderCircle, X } from 'lucide-react'
-import { api } from '../../services/api'
 import { cn } from '../../lib/cn'
-import type { AuditStatus, InvoiceDetail } from '../../types/api'
+import { invoiceLabel } from '../../lib/invoice'
 import { Button } from '../ui/Button'
 import { StatusBadge } from '../ui/StatusBadge'
-import { useToast } from '../ui/Toast'
-import { ActionsFooter, type BusyAction } from './ActionsFooter'
-import { FailedChecks, PassedChecks, type CheckFix } from './ChecksList'
+import { ActionsFooter } from './ActionsFooter'
+import { FailedChecks, PassedChecks } from './ChecksList'
 import { ConfirmDialog } from './ConfirmDialog'
-import {
-  applyFix,
-  buildUpdate,
-  draftFromInvoice,
-  fullNumber,
-  isDirty,
-  validateDraft,
-  type InvoiceDraft,
-} from './draft'
 import { EditForm } from './EditForm'
 import { HistoryTab } from './HistoryTab'
 import { InspectorTopBar, InvoiceMeta } from './InspectorHeader'
 import { LinesTable } from './LinesTable'
 import { PartiesCard } from './PartiesCard'
-import { reconcile } from './reconcile'
 import { ReconciliationCard } from './ReconciliationCard'
 import { trapTab, useBodyScrollLock, useDialogFocus } from './useDialog'
+import { useInspectorActions, type TabId, type Transition } from './useInspectorActions'
 
 export interface AuditInspectorProps {
   /** null = closed */
@@ -33,26 +22,15 @@ export interface AuditInspectorProps {
   onClose: () => void
   /** Called after PATCH / revalidate / XML export / delete. */
   onChanged: () => void
+  /** Called after the invoice was deleted, once the drawer is closed. */
+  onDeleted?: () => void
 }
 
-type TabId = 'audit' | 'history'
-type PendingConfirm = 'delete' | 'discard' | 'close' | null
-
-interface Transition {
-  from: AuditStatus
-  to: AuditStatus
-  errors: number
-  warnings: number
-  id: number
-}
-
-function errorMessage(reason: unknown, fallback: string): string {
-  return reason instanceof Error && reason.message ? reason.message : fallback
-}
-
-export function AuditInspector({ invoiceId, onClose, onChanged }: AuditInspectorProps) {
+export function AuditInspector({ invoiceId, onClose, onChanged, onDeleted }: AuditInspectorProps) {
   if (invoiceId === null) return null
-  return <InspectorDrawer key={invoiceId} invoiceId={invoiceId} onClose={onClose} onChanged={onChanged} />
+  return (
+    <InspectorDrawer key={invoiceId} invoiceId={invoiceId} onClose={onClose} onChanged={onChanged} onDeleted={onDeleted} />
+  )
 }
 
 function StatusTransition({ transition, onDismiss }: { transition: Transition; onDismiss: () => void }) {
@@ -90,220 +68,58 @@ function StatusTransition({ transition, onDismiss }: { transition: Transition; o
   )
 }
 
+const TAB_IDS: readonly TabId[] = ['audit', 'history']
+
 interface DrawerProps {
   invoiceId: number
   onClose: () => void
   onChanged: () => void
+  onDeleted?: () => void
 }
 
-function InspectorDrawer({ invoiceId, onClose, onChanged }: DrawerProps) {
-  const toast = useToast()
+function InspectorDrawer({ invoiceId, onClose, onChanged, onDeleted }: DrawerProps) {
   const panelRef = useRef<HTMLElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ audit: null, history: null })
   useDialogFocus(panelRef)
   useBodyScrollLock()
 
-  const [invoice, setInvoice] = useState<InvoiceDetail | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [attempt, setAttempt] = useState(0)
   const [tab, setTab] = useState<TabId>('audit')
-
-  const [editing, setEditing] = useState(false)
-  const [original, setOriginal] = useState<InvoiceDraft | null>(null)
-  const [draft, setDraft] = useState<InvoiceDraft | null>(null)
-  const [attempted, setAttempted] = useState(false)
-  const [apiProblems, setApiProblems] = useState<string[]>([])
-
-  const [busy, setBusy] = useState<BusyAction>(null)
-  const [exportError, setExportError] = useState<string | null>(null)
-  const [transition, setTransition] = useState<Transition | null>(null)
-  const [confirm, setConfirm] = useState<PendingConfirm>(null)
-  const transitionCounter = useRef(0)
-
-  useEffect(() => {
-    let cancelled = false
-    api
-      .getInvoice(invoiceId)
-      .then((result) => {
-        if (!cancelled) setInvoice(result)
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) setLoadError(errorMessage(reason, 'No se pudo cargar la factura'))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [invoiceId, attempt])
-
-  const retry = () => {
-    setLoadError(null)
-    setAttempt((value) => value + 1)
-  }
-
-  const dirty = editing && original !== null && draft !== null && isDirty(original, draft)
-  const clientProblems = useMemo(() => (attempted && draft ? validateDraft(draft) : []), [attempted, draft])
-  const problems = [...clientProblems, ...apiProblems]
-
-  const source = editing && draft ? draft : invoice
-  const reconciliation = useMemo(() => (source ? reconcile(source) : null), [source])
-
   const scrollToTop = () => bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
 
-  function showTransition(before: AuditStatus, after: InvoiceDetail) {
-    transitionCounter.current += 1
-    setTransition({
-      from: before,
-      to: after.audit_status,
-      errors: after.error_count,
-      warnings: after.warning_count,
-      id: transitionCounter.current,
-    })
-  }
-
-  const startEdit = useCallback(
-    (fix?: CheckFix) => {
-      if (!invoice) return
-      const base = draftFromInvoice(invoice)
-      setOriginal(base)
-      setDraft(fix ? applyFix(base, fix.target, fix.value) : base)
-      setAttempted(false)
-      setApiProblems([])
-      setTransition(null)
-      setEditing(true)
-      setTab('audit')
-    },
-    [invoice],
-  )
-
-  function leaveEdit() {
-    setEditing(false)
-    setDraft(null)
-    setOriginal(null)
-    setAttempted(false)
-    setApiProblems([])
-  }
-
-  function handleApplyFix(fix: CheckFix) {
-    if (editing) {
-      setDraft((current) => (current ? applyFix(current, fix.target, fix.value) : current))
-    } else {
-      startEdit(fix)
-      toast.info('Valor esperado aplicado', 'Revise el formulario y pulse «Guardar y re-auditar».')
-    }
-  }
-
-  function requestClose() {
-    if (dirty) setConfirm('close')
-    else onClose()
-  }
-
-  function requestDiscard() {
-    if (dirty) setConfirm('discard')
-    else leaveEdit()
-  }
-
-  async function save() {
-    if (!invoice || !original || !draft) return
-    setAttempted(true)
-    setApiProblems([])
-    if (validateDraft(draft).length > 0) {
-      scrollToTop()
-      return
-    }
-    const { payload } = buildUpdate(original, draft)
-    if (Object.keys(payload).length === 0) return
-    setBusy('save')
-    try {
-      const updated = await api.updateInvoice(invoice.id, payload)
-      showTransition(invoice.audit_status, updated)
-      setInvoice(updated)
-      setExportError(null)
-      leaveEdit()
-      scrollToTop()
-      toast.success(
-        updated.audit_status === 'VALIDATED' ? 'Factura corregida: cuadra' : 'Cambios guardados y factura re-auditada',
-        updated.audit_status === 'VALIDATED' ? undefined : `${updated.error_count} errores · ${updated.warning_count} avisos`,
-      )
-      onChanged()
-    } catch (reason) {
-      setApiProblems(errorMessage(reason, 'No se pudieron guardar los cambios').split(' · '))
-      scrollToTop()
-      toast.error('No se pudieron guardar los cambios')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function revalidate() {
-    if (!invoice) return
-    setBusy('revalidate')
-    try {
-      await api.revalidate(invoice.id)
-      const refreshed = await api.getInvoice(invoice.id)
-      showTransition(invoice.audit_status, refreshed)
-      setInvoice(refreshed)
-      setExportError(null)
-      toast.success('Factura re-validada', `${refreshed.error_count} errores · ${refreshed.warning_count} avisos`)
-      onChanged()
-    } catch (reason) {
-      toast.error('No se pudo re-validar', errorMessage(reason, 'Error desconocido'))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function exportXml() {
-    if (!invoice) return
-    setBusy('export')
-    setExportError(null)
-    try {
-      const filename = await api.downloadFacturae(invoice.id)
-      toast.success('XML FACe generado', filename)
-      onChanged()
-      try {
-        setInvoice(await api.getInvoice(invoice.id))
-      } catch {
-        // The export itself succeeded; the next refresh will show the new state.
-      }
-    } catch (reason) {
-      const message = errorMessage(reason, 'No se pudo generar el XML')
-      setExportError(message)
-      toast.error('No se pudo exportar a FACe')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function remove() {
-    if (!invoice) return
-    setBusy('delete')
-    try {
-      await api.deleteInvoice(invoice.id)
-      toast.success('Factura eliminada', fullNumber(invoice))
-      onChanged()
-      onClose()
-    } catch (reason) {
-      setConfirm(null)
-      toast.error('No se pudo eliminar la factura', errorMessage(reason, 'Error desconocido'))
-      setBusy(null)
-    }
-  }
+  const actions = useInspectorActions({ invoiceId, onClose, onChanged, onDeleted, setTab, scrollToTop })
+  const { invoice, reconciliation, editing, draft, busy, confirm } = actions
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (confirm) return
     if (event.key === 'Escape') {
       event.stopPropagation()
-      requestClose()
+      actions.requestClose()
       return
     }
     trapTab(event, panelRef.current)
   }
 
+  /** WAI-ARIA tabs: arrows move (and activate) between tabs, Home/End jump to the ends. */
+  function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const index = TAB_IDS.indexOf(tab)
+    let next = index
+    if (event.key === 'ArrowRight') next = (index + 1) % TAB_IDS.length
+    else if (event.key === 'ArrowLeft') next = (index - 1 + TAB_IDS.length) % TAB_IDS.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = TAB_IDS.length - 1
+    else return
+    event.preventDefault()
+    setTab(TAB_IDS[next])
+    tabRefs.current[TAB_IDS[next]]?.focus()
+  }
+
   const hasLogs = (invoice?.validation_logs.length ?? 0) > 0
+  const tabLabels: Record<TabId, string> = { audit: editing ? 'Corrección' : 'Auditoría', history: 'Historial' }
 
   return (
     <div className="fixed inset-0 z-50" onKeyDown={handleKeyDown}>
-      <div className="absolute inset-0 animate-fade-in bg-slate-900/40" aria-hidden onClick={requestClose} />
+      <div className="absolute inset-0 animate-fade-in bg-slate-900/40" aria-hidden onClick={actions.requestClose} />
       <aside
         ref={panelRef}
         role="dialog"
@@ -312,23 +128,23 @@ function InspectorDrawer({ invoiceId, onClose, onChanged }: DrawerProps) {
         tabIndex={-1}
         className="absolute inset-y-0 right-0 flex w-[min(760px,100vw)] animate-slide-in-right flex-col bg-slate-50 shadow-2xl focus:outline-none"
       >
-        <InspectorTopBar invoice={invoice} onClose={requestClose} />
+        <InspectorTopBar invoice={invoice} onClose={actions.requestClose} />
 
         <div role="tablist" aria-label="Secciones de la inspección" className="flex gap-1 border-b border-slate-200 bg-white px-4 sm:px-6">
-          {(
-            [
-              ['audit', editing ? 'Corrección' : 'Auditoría'],
-              ['history', 'Historial'],
-            ] as const
-          ).map(([id, label]) => (
+          {TAB_IDS.map((id) => (
             <button
               key={id}
+              ref={(element) => {
+                tabRefs.current[id] = element
+              }}
               type="button"
               role="tab"
               id={`tab-${id}`}
               aria-selected={tab === id}
               aria-controls={`panel-${id}`}
+              tabIndex={tab === id ? 0 : -1}
               onClick={() => setTab(id)}
+              onKeyDown={handleTabKeyDown}
               className={cn(
                 '-mb-px border-b-2 px-3 py-2.5 text-sm font-medium transition-colors',
                 tab === id
@@ -336,96 +152,102 @@ function InspectorDrawer({ invoiceId, onClose, onChanged }: DrawerProps) {
                   : 'border-transparent text-slate-500 hover:text-slate-800',
               )}
             >
-              {label}
+              {tabLabels[id]}
             </button>
           ))}
         </div>
 
-        <div ref={bodyRef} role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
-          {loadError ? (
-            <div role="alert" className="rounded-2xl bg-red-50 p-5 ring-1 ring-red-600/20">
-              <p className="flex items-center gap-2 text-sm font-semibold text-red-800">
-                <CircleAlert aria-hidden className="size-4" />
-                No se pudo cargar la factura
-              </p>
-              <p className="mt-1 text-sm text-red-700">{loadError}</p>
-              <Button className="mt-3" variant="secondary" size="sm" onClick={retry}>
-                Reintentar
-              </Button>
-            </div>
-          ) : !invoice || !reconciliation ? (
-            <p role="status" className="flex items-center justify-center gap-2 py-20 text-sm text-slate-500">
-              <LoaderCircle aria-hidden className="size-5 animate-spin" />
-              Cargando inspección…
-            </p>
-          ) : tab === 'history' ? (
-            <HistoryTab invoiceId={invoice.id} refreshToken={invoice.last_audit_run_id} />
-          ) : (
-            <div className="space-y-4 pb-2">
-              {problems.length > 0 && (
-                <div role="alert" className="rounded-2xl bg-red-50 p-4 ring-1 ring-red-600/20">
+        <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
+          <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden={tab !== 'history'}>
+            {tab === 'history' && invoice && <HistoryTab invoiceId={invoice.id} refreshToken={invoice.last_audit_run_id} />}
+          </div>
+          <div role="tabpanel" id="panel-audit" aria-labelledby="tab-audit" hidden={tab !== 'audit'}>
+            {tab === 'audit' &&
+              (actions.loadError ? (
+                <div role="alert" className="rounded-2xl bg-red-50 p-5 ring-1 ring-red-600/20">
                   <p className="flex items-center gap-2 text-sm font-semibold text-red-800">
                     <CircleAlert aria-hidden className="size-4" />
-                    No se puede guardar todavía
+                    No se pudo cargar la factura
                   </p>
-                  <ul className="mt-2 list-disc space-y-1 pl-6 text-sm text-red-700">
-                    {problems.map((problem) => (
-                      <li key={problem}>{problem}</li>
-                    ))}
-                  </ul>
+                  <p className="mt-1 text-sm text-red-700">{actions.loadError}</p>
+                  <Button className="mt-3" variant="secondary" size="sm" onClick={actions.retryLoad}>
+                    Reintentar
+                  </Button>
                 </div>
-              )}
-
-              {transition && !editing && <StatusTransition transition={transition} onDismiss={() => setTransition(null)} />}
-
-              {!editing && <InvoiceMeta invoice={invoice} />}
-
-              <ReconciliationCard data={reconciliation} preview={editing} />
-
-              <section aria-labelledby="checks-title" className="space-y-3">
-                <h3 id="checks-title" className="text-sm font-semibold text-slate-900">
-                  {editing ? 'Resultado de la última auditoría' : 'Discrepancias y avisos'}
-                </h3>
-                {editing && (
-                  <p className="-mt-1 text-xs text-slate-500">
-                    Se actualizará al guardar. Use «Aplicar valor esperado» para copiar el importe correcto al formulario.
-                  </p>
-                )}
-                {hasLogs ? (
-                  <FailedChecks checks={invoice.validation_logs} draft={draft} onApplyFix={handleApplyFix} />
-                ) : (
-                  <p className="rounded-2xl bg-white p-4 text-sm text-slate-600 ring-1 ring-slate-900/5">
-                    Esta factura todavía no tiene resultados de auditoría. Pulse «Re-validar» para ejecutarla.
-                  </p>
-                )}
-              </section>
-
-              {editing && draft ? (
-                <EditForm draft={draft} reconciliation={reconciliation} disabled={busy !== null} onChange={setDraft} />
+              ) : !invoice || !reconciliation ? (
+                <p role="status" className="flex items-center justify-center gap-2 py-20 text-sm text-slate-500">
+                  <LoaderCircle aria-hidden className="size-5 animate-spin" />
+                  Cargando inspección…
+                </p>
               ) : (
-                <>
-                  <LinesTable lines={invoice.lines} />
-                  <PartiesCard invoice={invoice} />
-                  {hasLogs && <PassedChecks checks={invoice.validation_logs} />}
-                </>
-              )}
-            </div>
-          )}
+                <div className="space-y-4 pb-2">
+                  {actions.problems.length > 0 && (
+                    <div role="alert" className="rounded-2xl bg-red-50 p-4 ring-1 ring-red-600/20">
+                      <p className="flex items-center gap-2 text-sm font-semibold text-red-800">
+                        <CircleAlert aria-hidden className="size-4" />
+                        No se puede guardar todavía
+                      </p>
+                      <ul className="mt-2 list-disc space-y-1 pl-6 text-sm text-red-700">
+                        {actions.problems.map((problem) => (
+                          <li key={problem}>{problem}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {actions.transition && !editing && (
+                    <StatusTransition transition={actions.transition} onDismiss={actions.dismissTransition} />
+                  )}
+
+                  {!editing && <InvoiceMeta invoice={invoice} />}
+
+                  <ReconciliationCard data={reconciliation} preview={editing} />
+
+                  <section aria-labelledby="checks-title" className="space-y-3">
+                    <h3 id="checks-title" className="text-sm font-semibold text-slate-900">
+                      {editing ? 'Resultado de la última auditoría' : 'Discrepancias y avisos'}
+                    </h3>
+                    {editing && (
+                      <p className="-mt-1 text-xs text-slate-500">
+                        Se actualizará al guardar. Use «Aplicar valor esperado» para copiar el importe correcto al formulario.
+                      </p>
+                    )}
+                    {hasLogs ? (
+                      <FailedChecks checks={invoice.validation_logs} draft={draft} onApplyFix={actions.applyCheckFix} />
+                    ) : (
+                      <p className="rounded-2xl bg-white p-4 text-sm text-slate-600 ring-1 ring-slate-900/5">
+                        Esta factura todavía no tiene resultados de auditoría. Pulse «Re-validar» para ejecutarla.
+                      </p>
+                    )}
+                  </section>
+
+                  {editing && draft ? (
+                    <EditForm draft={draft} reconciliation={reconciliation} disabled={busy !== null} onChange={actions.setDraft} />
+                  ) : (
+                    <>
+                      <LinesTable lines={invoice.lines} />
+                      <PartiesCard invoice={invoice} />
+                      {hasLogs && <PassedChecks checks={invoice.validation_logs} />}
+                    </>
+                  )}
+                </div>
+              ))}
+          </div>
         </div>
 
         {invoice && (
           <ActionsFooter
             invoice={invoice}
             editing={editing}
-            dirty={dirty}
+            dirty={actions.dirty}
             busy={busy}
-            exportError={exportError}
-            onStartEdit={() => startEdit()}
-            onDiscard={requestDiscard}
-            onSave={() => void save()}
-            onRevalidate={() => void revalidate()}
-            onExport={() => void exportXml()}
-            onDelete={() => setConfirm('delete')}
+            exportError={actions.exportError}
+            onStartEdit={() => actions.startEdit()}
+            onDiscard={actions.requestDiscard}
+            onSave={() => void actions.save()}
+            onRevalidate={() => void actions.revalidate()}
+            onExport={() => void actions.exportXml()}
+            onDelete={() => actions.setConfirm('delete')}
           />
         )}
       </aside>
@@ -436,10 +258,10 @@ function InspectorDrawer({ invoiceId, onClose, onChanged }: DrawerProps) {
           title="¿Eliminar esta factura?"
           confirmLabel="Eliminar factura"
           loading={busy === 'delete'}
-          onCancel={() => setConfirm(null)}
-          onConfirm={() => void remove()}
+          onCancel={() => actions.setConfirm(null)}
+          onConfirm={() => void actions.remove()}
         >
-          Se eliminará la factura <strong>{fullNumber(invoice)}</strong> de {invoice.supplier.name}, con su historial de
+          Se eliminará la factura <strong>{invoiceLabel(invoice)}</strong> de {invoice.supplier.name}, con su historial de
           auditorías y el archivo original. Esta acción no se puede deshacer.
         </ConfirmDialog>
       )}
@@ -448,13 +270,8 @@ function InspectorDrawer({ invoiceId, onClose, onChanged }: DrawerProps) {
           title="¿Descartar los cambios?"
           confirmLabel="Descartar cambios"
           cancelLabel="Seguir editando"
-          onCancel={() => setConfirm(null)}
-          onConfirm={() => {
-            const closing = confirm === 'close'
-            setConfirm(null)
-            leaveEdit()
-            if (closing) onClose()
-          }}
+          onCancel={() => actions.setConfirm(null)}
+          onConfirm={actions.confirmDiscard}
         >
           Hay modificaciones sin guardar en el formulario. Si continúa, se perderán.
         </ConfirmDialog>

@@ -1,7 +1,6 @@
-/** Mirrors backend settings: max_upload_size_mb = 15, PDF/PNG/JPEG/WEBP. */
-export const MAX_UPLOAD_MB = 15
-export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+import { getMaxUploadMb } from '../../lib/config'
 
+/** Accepted formats mirror the backend settings (PDF/PNG/JPEG/WEBP); the size limit comes from lib/config. */
 export const ACCEPT_ATTRIBUTE = '.pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/*'
 
 const ALLOWED_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'webp']
@@ -17,7 +16,8 @@ export function validateFile(file: File): string | null {
   if (file.size === 0) return 'El archivo está vacío.'
   const typeOk = ALLOWED_MIME_TYPES.includes(file.type) || (file.type === '' && ALLOWED_EXTENSIONS.includes(extensionOf(file.name)))
   if (!typeOk) return 'Formato no admitido. Sube un PDF o una imagen PNG, JPG o WEBP.'
-  if (file.size > MAX_UPLOAD_BYTES) return `El archivo supera el tamaño máximo de ${MAX_UPLOAD_MB} MB.`
+  const maxMb = getMaxUploadMb()
+  if (file.size > maxMb * 1024 * 1024) return `El archivo supera el tamaño máximo de ${maxMb} MB.`
   return null
 }
 

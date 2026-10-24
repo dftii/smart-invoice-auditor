@@ -4,7 +4,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -20,11 +20,13 @@ class Settings(BaseSettings):
 
     app_name: str = "SmartInvoice-FACe Auditor"
     app_version: str = "1.0.0"
-    environment: str = Field(default="development", description="development | production | test")
-    debug: bool = False
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"])
     log_level: str = "INFO"
+
+    # Optional shared secret. When set, every /api/v1 request must send it in the X-API-Key header
+    # and Facturae signing becomes available. /health is always public.
+    api_key: SecretStr | None = None
 
     # Database. SQLite by default; set e.g. mysql+pymysql://user:pass@host:3306/smartinvoice for MySQL.
     database_url: str = f"sqlite:///{(BACKEND_DIR / 'data' / 'smartinvoice.db').as_posix()}"
@@ -40,10 +42,11 @@ class Settings(BaseSettings):
     )
 
     # AI extraction. Without ANTHROPIC_API_KEY the extractor runs in demo mode.
-    anthropic_api_key: str | None = None
+    anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-5-5"
-    ai_timeout_seconds: float = 120.0
-    ai_fallback_to_demo: bool = True
+    ai_timeout_seconds: float = 90.0
+    # When the AI fails: False = answer 422 (default); True = fall back to the synthetic demo parser.
+    ai_fallback_to_demo: bool = False
 
     # Audit
     audit_tolerance: Decimal = Decimal("0.01")
@@ -56,9 +59,9 @@ class Settings(BaseSettings):
 
     # Facturae / FACe
     facturae_cert_path: Path | None = None
-    facturae_cert_password: str | None = None
+    facturae_cert_password: SecretStr | None = None
 
-    @field_validator("anthropic_api_key", "facturae_cert_password", mode="before")
+    @field_validator("anthropic_api_key", "facturae_cert_password", "api_key", mode="before")
     @classmethod
     def empty_string_to_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
@@ -73,16 +76,17 @@ class Settings(BaseSettings):
         return value
 
     @property
-    def is_sqlite(self) -> bool:
-        return self.database_url.startswith("sqlite")
-
-    @property
     def ai_enabled(self) -> bool:
-        return bool(self.anthropic_api_key)
+        return self.anthropic_api_key is not None
 
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
+
+    def secret(self, name: str) -> str | None:
+        """Plain value of a SecretStr setting (api_key, anthropic_api_key, facturae_cert_password)."""
+        value = getattr(self, name)
+        return value.get_secret_value() if value is not None else None
 
 
 @lru_cache

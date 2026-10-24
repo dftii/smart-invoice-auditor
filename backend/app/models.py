@@ -19,7 +19,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import expression
 from sqlalchemy.types import TypeDecorator
 
 from app.db.database import Base
@@ -64,9 +66,10 @@ class UTCDateTime(TypeDecorator[datetime]):
     """Stores datetimes in UTC and always returns them timezone-aware.
 
     SQLite and MySQL DATETIME drop the offset, so values read back would otherwise be naive.
+    MySQL's plain DATETIME also drops fractional seconds, so it uses DATETIME(6) there.
     """
 
-    impl = DateTime
+    impl = DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")
     cache_ok = True
 
     def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
@@ -149,6 +152,8 @@ class Invoice(TimestampMixin, Base):
     operation_date: Mapped[date | None] = mapped_column(Date)
     due_date: Mapped[date | None] = mapped_column(Date)
     currency: Mapped[str] = mapped_column(String(3), default="EUR", nullable=False)
+    # IBAN where the invoice must be paid (Facturae AccountToBeCredited); optional.
+    payment_iban: Mapped[str | None] = mapped_column(String(34))
 
     # Snapshot of the issuer tax id as printed on the invoice (may differ from supplier record).
     supplier_tax_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
@@ -189,6 +194,10 @@ class Invoice(TimestampMixin, Base):
         enum_column(ExtractionMethod, 10), default=ExtractionMethod.MANUAL, nullable=False
     )
     extraction_confidence: Mapped[float | None] = mapped_column(Float)
+    # True when the data was fabricated by the demo generator and does NOT come from the document.
+    is_synthetic: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=expression.false(), nullable=False
+    )
     raw_extraction: Mapped[dict | None] = mapped_column(JSON)
 
     source_filename: Mapped[str | None] = mapped_column(String(255))

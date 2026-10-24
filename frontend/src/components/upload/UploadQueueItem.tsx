@@ -1,4 +1,4 @@
-import { Ban, ChevronDown, CircleAlert, FastForward, FileText, RotateCw, X } from 'lucide-react'
+import { Ban, ChevronDown, CircleAlert, FastForward, FileText, RotateCw, TriangleAlert, X } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '../../lib/cn'
 import { formatFileSize } from '../../lib/format'
@@ -46,11 +46,14 @@ function Thumbnail({ item }: { item: UploadItem }) {
 export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onInspect }: UploadQueueItemProps) {
   const { phase, file } = item
   const [expanded, setExpanded] = useState<boolean | null>(null)
+  const [confirmingRetry, setConfirmingRetry] = useState(false)
 
   const checksVisible = expanded ?? phase.kind === 'revealing'
   const canCancel = phase.kind === 'uploading' || (phase.kind === 'processing' && !phase.result)
   const canSkip = (phase.kind === 'processing' && phase.result !== null) || phase.kind === 'revealing'
   const canRetry = phase.kind === 'cancelled' || (phase.kind === 'error' && phase.retryable)
+  // The server may already hold this invoice; retrying then needs an explicit "yes, duplicate it".
+  const retryNeedsConfirm = (phase.kind === 'cancelled' || phase.kind === 'error') && phase.maybeCreated === true
   const canRemove = phase.kind === 'queued' || phase.kind === 'done' || phase.kind === 'error' || phase.kind === 'cancelled'
 
   const statusText = (() => {
@@ -106,7 +109,8 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
             </Button>
           )}
           {canRetry && (
-            <Button variant="secondary" size="sm" icon={<RotateCw aria-hidden className="size-4" />} onClick={() => onRetry(item.id)}>
+            <Button variant="secondary" size="sm" icon={<RotateCw aria-hidden className="size-4" />} onClick={() => (retryNeedsConfirm ? setConfirmingRetry(true) : onRetry(item.id))}
+            >
               Reintentar
             </Button>
           )}
@@ -170,7 +174,42 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
         </p>
       )}
 
-      {phase.kind === 'cancelled' && <p className="text-sm text-slate-500">La subida se canceló antes de terminar.</p>}
+      {phase.kind === 'cancelled' &&
+        (phase.maybeCreated ? (
+          <p role="status" className="flex items-start gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-600/20">
+            <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-amber-600" />
+            <span className="min-w-0">
+              Cancelada en el navegador; el servidor puede haberla registrado. Revisa la tabla de facturas antes de
+              volver a subirla.
+            </span>
+          </p>
+        ) : (
+          <p className="text-sm text-slate-500">La subida se canceló antes de terminar.</p>
+        ))}
+
+      {confirmingRetry && retryNeedsConfirm && (
+        <div role="alert" className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-600/20">
+          <p>
+            <strong className="font-semibold">Posible duplicado.</strong> El servidor ya pudo guardar esta factura; si la
+            vuelves a subir, quedará registrada dos veces (la auditoría la marcará como duplicada).
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                setConfirmingRetry(false)
+                onRetry(item.id)
+              }}
+            >
+              Reintentar igualmente
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirmingRetry(false)}>
+              No reintentar
+            </Button>
+          </div>
+        </div>
+      )}
     </li>
   )
 }

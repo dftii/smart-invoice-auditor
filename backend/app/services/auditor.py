@@ -5,13 +5,14 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.money import HUNDRED, round_money, to_decimal
 from app.models import AuditStatus, Invoice, InvoiceLine, Severity, ValidationLog
 from app.schemas import AuditCheck, AuditReport
 from app.services.tax_id import normalize_tax_id, validate_tax_id
@@ -33,9 +34,8 @@ DUPLICATE = "DUPLICATE"
 CURRENCY = "CURRENCY"
 FACE_DIR3 = "FACE_DIR3"
 FACE_PARTY_DATA = "FACE_PARTY_DATA"
+SYNTHETIC_DATA = "SYNTHETIC_DATA"
 
-CENT = Decimal("0.01")
-HUNDRED = Decimal(100)
 FACE_CURRENCY = "EUR"
 DIR3_FIELDS = (
     ("dir3_accounting_office", "oficina contable"),
@@ -53,14 +53,8 @@ _SPANISH_POSTAL_CODE = re.compile(r"^\d{5}$")
 _NON_ALNUM = re.compile(r"[^0-9A-Za-z]")
 
 
-def _dec(value: object) -> Decimal:
-    if value is None:
-        return Decimal(0)
-    return value if isinstance(value, Decimal) else Decimal(str(value))
-
-
-def _round(value: Decimal) -> Decimal:
-    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+_dec = to_decimal
+_round = round_money
 
 
 def _eur(value: Decimal) -> str:
@@ -86,6 +80,50 @@ def _today() -> date:
 
 def _normalize_number(series: str | None, number: str | None) -> str:
     return _NON_ALNUM.sub("", f"{series or ''}{number or ''}").upper()
+
+
+def find_related_invoice_ids(
+    db: Session,
+    *,
+    supplier_id: int | None,
+    supplier_tax_id: str | None,
+    series: str | None,
+    number: str | None,
+    file_hash: str | None,
+    exclude_id: int | None = None,
+) -> list[int]:
+    """Ids of the other invoices that share the (supplier tax id, series+number) key or the source file hash.
+
+    Their audit result depends on this invoice (duplicate detection), so they must be re-audited when it
+    is edited or deleted. An empty supplier tax id never matches by number.
+    """
+    tax_id = normalize_tax_id(supplier_tax_id or "")
+    normalized_number = _normalize_number(series, number)
+    conditions = []
+    if tax_id:
+        conditions.append(or_(Invoice.supplier_tax_id == tax_id, Invoice.supplier_tax_id == (supplier_tax_id or "")))
+        if supplier_id is not None:
+            conditions.append(Invoice.supplier_id == supplier_id)
+    if file_hash:
+        conditions.append(Invoice.source_file_hash == file_hash)
+    if not conditions:
+        return []
+    statement = select(
+        Invoice.id, Invoice.supplier_tax_id, Invoice.invoice_series, Invoice.invoice_number, Invoice.source_file_hash
+    ).where(or_(*conditions))
+    if exclude_id is not None:
+        statement = statement.where(Invoice.id != exclude_id)
+    related = []
+    for row in db.execute(statement.order_by(Invoice.id)):
+        same_hash = bool(file_hash) and row.source_file_hash == file_hash
+        same_number = (
+            bool(tax_id)
+            and normalize_tax_id(row.supplier_tax_id) == tax_id
+            and _normalize_number(row.invoice_series, row.invoice_number) == normalized_number
+        )
+        if same_hash or same_number:
+            related.append(row.id)
+    return related
 
 
 def _ok(rule_code: str, message: str, *, field: str | None = None) -> AuditCheck:
@@ -142,6 +180,7 @@ class InvoiceAuditor:
         checks += self._check_currency(invoice)
         checks += self._check_dir3(invoice)
         checks += self._check_party_data(invoice)
+        checks += self._check_synthetic(invoice)
 
         errors = [c for c in checks if not c.passed and c.severity is Severity.ERROR]
         warnings = [c for c in checks if not c.passed and c.severity is Severity.WARNING]
@@ -546,29 +585,40 @@ class InvoiceAuditor:
         number = _normalize_number(invoice.invoice_series, invoice.invoice_number)
         label = invoice.full_number
 
-        rows = self.db.execute(
-            select(
-                Invoice.id,
-                Invoice.supplier_tax_id,
-                Invoice.invoice_series,
-                Invoice.invoice_number,
-            ).where(
-                Invoice.id < invoice.id,
-                or_(
-                    Invoice.supplier_id == invoice.supplier_id,
-                    Invoice.supplier_tax_id.in_({invoice.supplier_tax_id, supplier_tax_id}),
-                ),
+        same_number: list[int] = []
+        if supplier_tax_id:
+            rows = self.db.execute(
+                select(
+                    Invoice.id,
+                    Invoice.supplier_tax_id,
+                    Invoice.invoice_series,
+                    Invoice.invoice_number,
+                ).where(
+                    Invoice.id < invoice.id,
+                    or_(
+                        Invoice.supplier_id == invoice.supplier_id,
+                        Invoice.supplier_tax_id.in_({invoice.supplier_tax_id, supplier_tax_id}),
+                    ),
+                )
+            ).all()
+            same_number = sorted(
+                row.id
+                for row in rows
+                if normalize_tax_id(row.supplier_tax_id) == supplier_tax_id
+                and _normalize_number(row.invoice_series, row.invoice_number) == number
             )
-        ).all()
-        same_number = sorted(
-            row.id
-            for row in rows
-            if normalize_tax_id(row.supplier_tax_id) == supplier_tax_id
-            and _normalize_number(row.invoice_series, row.invoice_number) == number
-        )
 
         checks: list[AuditCheck] = []
-        if same_number:
+        if not supplier_tax_id:
+            checks.append(
+                _ok(
+                    DUPLICATE,
+                    "No se ha podido comprobar la duplicidad por número: la factura no tiene identificador fiscal "
+                    "del emisor",
+                    field="invoice_number",
+                )
+            )
+        elif same_number:
             checks.append(
                 _fail(
                     DUPLICATE,
@@ -668,6 +718,22 @@ class InvoiceAuditor:
                 Severity.WARNING,
                 f"Datos incompletos para generar Facturae ({'; '.join(problems)})",
                 field="parties",
+            )
+        ]
+
+    @staticmethod
+    def _check_synthetic(invoice: Invoice) -> list[AuditCheck]:
+        """Fabricated demo data never corresponds to the document, so it can never be validated."""
+        if not invoice.is_synthetic:
+            return []
+        return [
+            _fail(
+                SYNTHETIC_DATA,
+                Severity.ERROR,
+                "Datos sintéticos de demostración: no corresponden al documento",
+                field="is_synthetic",
+                expected="false",
+                actual="true",
             )
         ]
 

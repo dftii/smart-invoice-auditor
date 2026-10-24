@@ -1,26 +1,50 @@
 """Pydantic v2 schemas for API I/O, extraction results and audit reports."""
 
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
+from app.core.money import MAX_ABS_AMOUNT
 from app.models import AuditStatus, ExtractionMethod, PersonType, Severity, TaxIdType
+from app.services.iban import is_valid_iban, normalize_iban
+from app.services.tax_id import normalize_tax_id
 
 # Decimals travel as JSON strings ("1234.50") so no precision is lost in transit.
 DecimalStr = Annotated[Decimal, PlainSerializer(lambda value: format(value, "f"), return_type=str, when_used="json")]
 
 T = TypeVar("T")
 
+# Largest value of a 32-bit signed integer column / path parameter; anything above would overflow the database.
+MAX_ID = 2**31 - 1
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
 
 def _normalize_tax_id(value: str | None) -> str | None:
+    return normalize_tax_id(value) or None
+
+
+def _normalize_currency(value: str | None) -> str | None:
+    """ISO 4217 alphabetic code: three letters, uppercase."""
     if value is None:
         return None
-    cleaned = "".join(ch for ch in value.upper() if ch.isalnum())
-    if cleaned.startswith("ES") and len(cleaned) == 11:
-        cleaned = cleaned[2:]
-    return cleaned or None
+    code = value.strip().upper()
+    if not _CURRENCY_RE.match(code):
+        raise ValueError("La moneda debe ser un código ISO 4217 de tres letras (por ejemplo, EUR)")
+    return code
+
+
+def _normalize_iban(value: str | None) -> str | None:
+    if value is None:
+        return None
+    iban = normalize_iban(value)
+    if not iban:
+        return None
+    if not is_valid_iban(iban):
+        raise ValueError("El IBAN no es válido (formato o dígitos de control incorrectos)")
+    return iban
 
 
 class ORMModel(BaseModel):
@@ -67,8 +91,20 @@ class SupplierUpdate(BaseModel):
     phone: str | None = Field(default=None, max_length=30)
 
 
-class SupplierRead(SupplierBase, ORMModel):
+class SupplierRead(ORMModel):
+    """Stored supplier: plain types without input constraints, so reading existing data never fails."""
+
     id: int
+    name: str
+    tax_id: str
+    person_type: PersonType
+    address: str | None = None
+    postal_code: str | None = None
+    city: str | None = None
+    province: str | None = None
+    country_code: str
+    email: str | None = None
+    phone: str | None = None
     tax_id_type: TaxIdType
     tax_id_valid: bool
     created_at: datetime
@@ -83,24 +119,34 @@ class SupplierWithStats(SupplierRead):
 # --------------------------------------------------------------------------- Invoice lines
 
 
-class InvoiceLineBase(BaseModel):
-    concept: str = Field(min_length=1, max_length=500)
-    quantity: DecimalStr = Field(gt=0)
-    unit_of_measure: str = Field(default="01", min_length=2, max_length=2)
+class InvoiceLineFields(BaseModel):
+    """Line fields without constraints: the shape of stored data (used by the Read model)."""
+
+    concept: str
+    quantity: DecimalStr
+    unit_of_measure: str = "01"
     unit_price: DecimalStr
-    discount_rate: DecimalStr = Field(default=Decimal("0.00"), ge=0, le=100)
-    vat_rate: DecimalStr = Field(ge=0, le=100)
-    irpf_rate: DecimalStr = Field(default=Decimal("0.00"), ge=0, le=100)
+    discount_rate: DecimalStr = Decimal("0.00")
+    vat_rate: DecimalStr
+    irpf_rate: DecimalStr = Decimal("0.00")
     line_base: DecimalStr
     vat_amount: DecimalStr
     irpf_amount: DecimalStr = Decimal("0.00")
 
 
-class InvoiceLineCreate(InvoiceLineBase):
+class InvoiceLineCreate(InvoiceLineFields):
+    """Line sent by a client: validated. A zero or negative quantity is rejected."""
+
+    concept: str = Field(min_length=1, max_length=500)
+    quantity: DecimalStr = Field(gt=0)
+    unit_of_measure: str = Field(default="01", min_length=2, max_length=2)
+    discount_rate: DecimalStr = Field(default=Decimal("0.00"), ge=0, le=100)
+    vat_rate: DecimalStr = Field(ge=0, le=100)
+    irpf_rate: DecimalStr = Field(default=Decimal("0.00"), ge=0, le=100)
     line_number: int | None = Field(default=None, ge=1)
 
 
-class InvoiceLineRead(InvoiceLineBase, ORMModel):
+class InvoiceLineRead(InvoiceLineFields, ORMModel):
     id: int
     line_number: int
 
@@ -143,6 +189,21 @@ class InvoiceBuyerFields(BaseModel):
         return _normalize_tax_id(value)
 
 
+class InvoiceBuyerRead(BaseModel):
+    """Stored buyer / DIR3 data, without input constraints."""
+
+    buyer_name: str | None = None
+    buyer_tax_id: str | None = None
+    buyer_address: str | None = None
+    buyer_postal_code: str | None = None
+    buyer_city: str | None = None
+    buyer_province: str | None = None
+    buyer_country_code: str = "ESP"
+    dir3_accounting_office: str | None = None
+    dir3_managing_body: str | None = None
+    dir3_processing_unit: str | None = None
+
+
 class InvoiceCreate(InvoiceBuyerFields):
     """Manual invoice creation (no file). Supplier is upserted by tax id."""
 
@@ -153,12 +214,23 @@ class InvoiceCreate(InvoiceBuyerFields):
     operation_date: date | None = None
     due_date: date | None = None
     currency: str = Field(default="EUR", min_length=3, max_length=3)
+    payment_iban: str | None = Field(default=None, max_length=50, description="IBAN donde se abona la factura")
     tax_base: DecimalStr
     total_vat: DecimalStr = Decimal("0.00")
     total_irpf: DecimalStr = Decimal("0.00")
     total_amount: DecimalStr
     notes: str | None = None
     lines: list[InvoiceLineCreate] = Field(min_length=1)
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return _normalize_currency(value) or "EUR"
+
+    @field_validator("payment_iban")
+    @classmethod
+    def validate_iban(cls, value: str | None) -> str | None:
+        return _normalize_iban(value)
 
 
 class InvoiceUpdate(BaseModel):
@@ -169,6 +241,8 @@ class InvoiceUpdate(BaseModel):
     issue_date: date | None = None
     operation_date: date | None = None
     due_date: date | None = None
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    payment_iban: str | None = Field(default=None, max_length=50)
     supplier_tax_id: str | None = Field(default=None, max_length=20)
     buyer_name: str | None = Field(default=None, max_length=255)
     buyer_tax_id: str | None = Field(default=None, max_length=20)
@@ -187,10 +261,26 @@ class InvoiceUpdate(BaseModel):
     notes: str | None = None
     lines: list[InvoiceLineCreate] | None = None
 
-    @field_validator("supplier_tax_id", "buyer_tax_id")
+    @field_validator("buyer_tax_id")
     @classmethod
-    def normalize_ids(cls, value: str | None) -> str | None:
+    def normalize_buyer_id(cls, value: str | None) -> str | None:
         return _normalize_tax_id(value)
+
+    @field_validator("supplier_tax_id")
+    @classmethod
+    def normalize_supplier_id(cls, value: str | None) -> str | None:
+        # An id with no usable characters stays "" (not None) so the service can explain that it is empty.
+        return normalize_tax_id(value) if value is not None else None
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str | None) -> str | None:
+        return _normalize_currency(value)
+
+    @field_validator("payment_iban")
+    @classmethod
+    def validate_iban(cls, value: str | None) -> str | None:
+        return _normalize_iban(value)
 
 
 class InvoiceSummary(ORMModel):
@@ -212,6 +302,7 @@ class InvoiceSummary(ORMModel):
     warning_count: int
     extraction_method: ExtractionMethod
     extraction_confidence: float | None = None
+    is_synthetic: bool = False
     source_filename: str | None = None
     last_audited_at: datetime | None = None
     facturae_exported_at: datetime | None = None
@@ -219,7 +310,7 @@ class InvoiceSummary(ORMModel):
     created_at: datetime
 
 
-class InvoiceRead(InvoiceBuyerFields, ORMModel):
+class InvoiceRead(InvoiceBuyerRead, ORMModel):
     id: int
     supplier: SupplierRead
     supplier_tax_id: str
@@ -229,6 +320,7 @@ class InvoiceRead(InvoiceBuyerFields, ORMModel):
     operation_date: date | None = None
     due_date: date | None = None
     currency: str
+    payment_iban: str | None = None
     tax_base: DecimalStr
     total_vat: DecimalStr
     total_irpf: DecimalStr
@@ -243,6 +335,7 @@ class InvoiceRead(InvoiceBuyerFields, ORMModel):
     facturae_export_count: int = 0
     extraction_method: ExtractionMethod
     extraction_confidence: float | None = None
+    is_synthetic: bool = False
     source_filename: str | None = None
     source_mime_type: str | None = None
     source_file_hash: str | None = None
@@ -268,12 +361,12 @@ SortField = Literal["issue_date", "total_amount", "created_at", "invoice_number"
 
 class InvoiceFilters(BaseModel):
     status: AuditStatus | None = None
-    supplier_id: int | None = None
+    supplier_id: int | None = Field(default=None, ge=1, le=MAX_ID)
     tax_id: str | None = None
     date_from: date | None = None
     date_to: date | None = None
-    min_total: Decimal | None = None
-    max_total: Decimal | None = None
+    min_total: Decimal | None = Field(default=None, ge=-MAX_ABS_AMOUNT, le=MAX_ABS_AMOUNT)
+    max_total: Decimal | None = Field(default=None, ge=-MAX_ABS_AMOUNT, le=MAX_ABS_AMOUNT)
     extraction_method: ExtractionMethod | None = None
     exported: bool | None = Field(default=None, description="true = Facturae XML already generated")
     has_errors: bool | None = Field(default=None, description="true = DISCREPANCY or DUPLICATE")
@@ -336,6 +429,7 @@ class ExtractionResult(BaseModel):
     dir3_accounting_office: str | None = None
     dir3_managing_body: str | None = None
     dir3_processing_unit: str | None = None
+    is_synthetic: bool = Field(default=False, description="True when the data was fabricated, not read")
     warnings: list[str] = Field(default_factory=list)
     raw_text: str | None = Field(default=None, description="Text extracted from the document, if any")
 
@@ -374,7 +468,9 @@ class UploadResponse(BaseModel):
 
 
 class BulkRevalidateRequest(BaseModel):
-    invoice_ids: list[int] | None = Field(default=None, description="None = revalidate all invoices")
+    invoice_ids: list[Annotated[int, Field(ge=1, le=MAX_ID)]] | None = Field(
+        default=None, max_length=10_000, description="None = revalidate all invoices"
+    )
     status: AuditStatus | None = Field(default=None, description="Only revalidate invoices in this status")
 
 
@@ -443,5 +539,5 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     app: str
     version: str
-    database: str
+    database: Literal["ok"]
     extraction_mode: Literal["AI", "DEMO"]

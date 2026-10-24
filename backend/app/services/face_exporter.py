@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.hazmat.primitives.serialization import pkcs12
 from lxml import etree
 
 from app.core.config import Settings, get_settings
+from app.core.money import to_decimal
 from app.models import AuditStatus, Invoice, InvoiceLine, PersonType
+from app.services.iban import is_valid_iban, normalize_iban
+from app.services.tax_id import normalize_tax_id
+
+if TYPE_CHECKING:  # cryptography is only needed for signing and is imported lazily
+    from cryptography import x509
+
+logger = logging.getLogger(__name__)
 
 FACTURAE_NAMESPACE = "http://www.facturae.gob.es/formato/Versiones/Facturaev3_2_2.xml"
 XMLDSIG_NAMESPACE = "http://www.w3.org/2000/09/xmldsig#"
@@ -44,6 +51,14 @@ _SPANISH_SURNAME_PARTICLES = frozenset(
 )
 _INDIVIDUAL_TAX_ID = re.compile(r"^(\d{8}[A-Z]|[XYZKLM]\d{7}[A-Z])$")
 
+# Maximum lengths imposed by the Facturae 3.2.2 XSD (see tests/xsd/Facturaev3_2_2.xsd).
+MAX_ADDRESS = 80
+MAX_TOWN = 50
+MAX_PROVINCE = 20
+MAX_CORPORATE_NAME = 80
+MAX_INDIVIDUAL_NAME = 40
+MAX_POST_CODE_AND_TOWN = 50
+
 
 class FacturaeExportError(Exception):
     """Raised when an invoice cannot be exported (or signed) as Facturae."""
@@ -69,8 +84,7 @@ class _PartyData:
     country_code: str
 
 
-def _dec(value: Decimal | str | float | None) -> Decimal:
-    return Decimal(str(value if value is not None else 0))
+_dec = to_decimal
 
 
 def _fmt(value: Decimal, quantum: Decimal) -> str:
@@ -95,13 +109,6 @@ def _clean(value: str | None, max_len: int, *, multiline: bool = False) -> str:
     return text[:max_len]
 
 
-def _normalize_tax_id(value: str | None) -> str:
-    compact = re.sub(r"[\s.\-]", "", (value or "").upper())
-    if compact.startswith("ES") and len(compact) == 11:
-        return compact[2:]
-    return compact
-
-
 def _infer_person_type(tax_id: str) -> str:
     return PersonType.INDIVIDUAL.value if _INDIVIDUAL_TAX_ID.match(tax_id) else PersonType.LEGAL_ENTITY.value
 
@@ -112,6 +119,25 @@ def _split_trailing_surname(tokens: list[str]) -> tuple[str, list[str]]:
     while start > 0 and tokens[start - 1].lower() in _SPANISH_SURNAME_PARTICLES:
         start -= 1
     return " ".join(tokens[start:]), tokens[:start]
+
+
+def _length_problems(party: _PartyData) -> list[str]:
+    """Fields longer than the XSD allows: they are reported instead of silently truncated."""
+    limits = [
+        ("dirección", _clean(party.address, 10_000), MAX_ADDRESS),
+        ("población", _clean(party.city, 10_000), MAX_TOWN),
+        ("provincia", _clean(party.province, 10_000), MAX_PROVINCE),
+    ]
+    if party.person_type != PersonType.INDIVIDUAL.value:
+        limits.append(("nombre", _clean(party.name, 10_000), MAX_CORPORATE_NAME))
+    if party.country_code != "ESP":
+        postal_and_town = _clean(f"{_clean(party.postal_code, 10_000)} {_clean(party.city, 10_000)}", 10_000)
+        limits.append(("código postal y población", postal_and_town, MAX_POST_CODE_AND_TOWN))
+    return [
+        f"{party.role}: {label} «{value}» tiene {len(value)} caracteres y Facturae admite como máximo {limit}"
+        for label, value, limit in limits
+        if len(value) > limit
+    ]
 
 
 def split_individual_name(full_name: str) -> tuple[str, str, str | None]:
@@ -160,7 +186,7 @@ class FacturaeExporter:
     # ------------------------------------------------------------------ public API
 
     def filename_for(self, invoice: Invoice) -> str:
-        tax_id = _normalize_tax_id(invoice.supplier_tax_id) or "SIN-NIF"
+        tax_id = normalize_tax_id(invoice.supplier_tax_id) or "SIN-NIF"
         raw = f"facturae_{tax_id}_{invoice.full_number}"
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_")
         return f"{safe}.xml"
@@ -199,6 +225,11 @@ class FacturaeExporter:
 
     @staticmethod
     def _ensure_exportable(invoice: Invoice) -> None:
+        if invoice.is_synthetic:
+            raise FacturaeExportError(
+                "Los datos de esta factura son sintéticos (modo demostración) y no corresponden al documento: "
+                "no se puede exportar a Facturae."
+            )
         if invoice.audit_status != AuditStatus.VALIDATED:
             current = invoice.audit_status.value if invoice.audit_status else "desconocido"
             raise FacturaeExportError(
@@ -206,10 +237,14 @@ class FacturaeExporter:
             )
         if not invoice.lines:
             raise FacturaeExportError("La factura no tiene líneas y no se puede exportar a Facturae.")
+        if _dec(invoice.total_amount) < 0 or _dec(invoice.tax_base) < 0:
+            raise FacturaeExportError("Las facturas rectificativas no están soportadas todavía.")
         if (invoice.currency or "").upper() != "EUR":
             raise FacturaeExportError(f"FACe solo admite facturas en EUR (la factura está en {invoice.currency}).")
         if len(invoice.invoice_number or "") > 20 or len(invoice.invoice_series or "") > 20:
             raise FacturaeExportError("Facturae limita el número y la serie de factura a 20 caracteres cada uno.")
+        if invoice.payment_iban and not is_valid_iban(invoice.payment_iban):
+            raise FacturaeExportError("El IBAN de la factura no es válido.")
 
     @staticmethod
     def _ensure_totals(invoice: Invoice, lines: list[InvoiceLine]) -> None:
@@ -276,7 +311,7 @@ class FacturaeExporter:
     @staticmethod
     def _seller_data(invoice: Invoice) -> _PartyData:
         supplier = invoice.supplier
-        tax_id = _normalize_tax_id(invoice.supplier_tax_id or supplier.tax_id)
+        tax_id = normalize_tax_id(invoice.supplier_tax_id or supplier.tax_id)
         return _PartyData(
             role="emisor",
             tax_id=tax_id,
@@ -291,7 +326,7 @@ class FacturaeExporter:
 
     @staticmethod
     def _buyer_data(invoice: Invoice) -> _PartyData:
-        tax_id = _normalize_tax_id(invoice.buyer_tax_id)
+        tax_id = normalize_tax_id(invoice.buyer_tax_id)
         return _PartyData(
             role="receptor",
             tax_id=tax_id,
@@ -319,6 +354,7 @@ class FacturaeExporter:
             missing = [label for label, value in fields.items() if not (value or "").strip()]
             if missing:
                 problems.append(f"{party.role}: falta {', '.join(missing)}")
+            problems.extend(_length_problems(party))
             if len(party.country_code) != 3 or not party.country_code.isalpha():
                 problems.append(f"{party.role}: el código de país «{party.country_code}» debe ser ISO 3166-1 alfa-3")
             elif party.country_code == "ESP" and not re.fullmatch(r"\d{5}", (party.postal_code or "").strip()):
@@ -359,6 +395,11 @@ class FacturaeExporter:
 
         if party.person_type == PersonType.INDIVIDUAL.value:
             name, first_surname, second_surname = split_individual_name(party.name)
+            for label, part in (("nombre", name), ("primer apellido", first_surname), ("segundo apellido", second_surname)):
+                if part and len(_clean(part, 10_000)) > MAX_INDIVIDUAL_NAME:
+                    raise FacturaeExportError(
+                        f"{party.role}: el {label} «{part}» supera los {MAX_INDIVIDUAL_NAME} caracteres de Facturae."
+                    )
             individual = etree.SubElement(parent, "Individual")
             self._text(individual, "Name", _clean(name, 40))
             self._text(individual, "FirstSurname", _clean(first_surname, 40))
@@ -453,11 +494,15 @@ class FacturaeExporter:
         for line in lines:
             self._add_line(items, line)
 
-        if invoice.due_date:
+        # A credit transfer without the account to credit is invalid for FACe, so payment data is only
+        # written when both the due date and the IBAN are known.
+        iban = normalize_iban(invoice.payment_iban)
+        if invoice.due_date and iban:
             installment = etree.SubElement(etree.SubElement(node, "PaymentDetails"), "Installment")
             self._text(installment, "InstallmentDueDate", self._iso(invoice.due_date))
             self._text(installment, "InstallmentAmount", _money(_dec(invoice.total_amount)))
             self._text(installment, "PaymentMeans", PAYMENT_MEANS_TRANSFER)
+            self._text(etree.SubElement(installment, "AccountToBeCredited"), "IBAN", iban)
 
     @staticmethod
     def _iso(value: date) -> str:
@@ -523,20 +568,24 @@ class FacturaeExporter:
             raise FacturaeExportError(
                 "No se puede firmar la factura: no hay certificado configurado (FACTURAE_CERT_PATH)."
             )
+        from cryptography.hazmat.primitives.serialization import pkcs12
+
         path = Path(cert_path)
         if not path.is_file():
-            raise FacturaeExportError(f"No se puede firmar la factura: no existe el certificado {path}.")
-        password = self.settings.facturae_cert_password
+            logger.error("Facturae signing certificate not found: %s", path)
+            raise FacturaeExportError("No se puede firmar la factura: el certificado configurado no existe en el servidor.")
+        password = self.settings.secret("facturae_cert_password")
         try:
             key, certificate, extra = pkcs12.load_key_and_certificates(
                 path.read_bytes(), password.encode("utf-8") if password else None
             )
         except (ValueError, TypeError, OSError) as exc:
+            logger.error("Could not open the PKCS#12 certificate %s: %s", path.name, exc)
             raise FacturaeExportError(
-                f"No se pudo abrir el certificado PKCS#12 {path.name} (¿contraseña incorrecta?): {exc}"
+                "No se pudo abrir el certificado PKCS#12 configurado (¿contraseña incorrecta?)."
             ) from exc
         if key is None or certificate is None:
-            raise FacturaeExportError(f"El archivo {path.name} no contiene clave privada y certificado.")
+            raise FacturaeExportError("El certificado configurado no contiene clave privada y certificado.")
         return key, certificate, list(extra)
 
     def _sign(self, root: etree._Element) -> etree._Element:
@@ -547,6 +596,8 @@ class FacturaeExporter:
             raise FacturaeExportError(
                 "No se puede firmar la factura: la instalación de signxml no incluye soporte XAdES."
             ) from exc
+
+        from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
         key, certificate, extra = self._load_credentials()
         if isinstance(key, rsa.RSAPrivateKey):
@@ -573,13 +624,15 @@ class FacturaeExporter:
         try:
             return signer.sign(root, key=key, cert=[certificate, *extra])
         except Exception as exc:  # signxml/cryptography raise heterogeneous errors; surface them uniformly
-            raise FacturaeExportError(f"Error al firmar la factura con XAdES-EPES: {exc}") from exc
+            logger.error("XAdES-EPES signing failed: %s", exc)
+            raise FacturaeExportError("Error al firmar la factura con XAdES-EPES.") from exc
 
 
 def _build_signer_class(base: type) -> type:
     """Return an XAdES signer emitting the XAdES 1.3.2 `SigningCertificate` (v1) block required by Facturae."""
     from base64 import b64encode
 
+    from cryptography import x509
     from lxml.etree import SubElement
     from signxml.util import ds_tag, xades_tag
 
@@ -607,8 +660,3 @@ def _build_signer_class(base: type) -> type:
             )
 
     return FacturaeXAdESSigner
-
-
-def export_facturae(invoice: Invoice, settings: Settings | None = None) -> bytes:
-    """Convenience wrapper: build (and sign when a certificate is configured) the Facturae XML."""
-    return FacturaeExporter(settings).to_xml(invoice)

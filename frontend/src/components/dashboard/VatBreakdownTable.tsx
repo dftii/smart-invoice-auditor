@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { VatBreakdown } from '../../types/api'
-import { centsToDecimal, formatEur, formatPercent, toCents, toNumber } from '../../lib/format'
+import { formatEur, formatPercent } from '../../lib/format'
+import { centsToDecimal, toCents, toNumber } from '../../lib/decimal'
 import { ChartCard } from './ChartCard'
 
 const STANDARD_RATES = [21, 10, 4, 0]

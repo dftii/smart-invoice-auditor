@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Download, FileSearch, FileUp, SearchX } from 'lucide-react'
 import type { InvoiceFilters, SortField } from '../../types/api'
-import { api } from '../../services/api'
+import { api, isHttpTransport } from '../../services/api'
 import { useAsync } from '../../hooks/useAsync'
 import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { Button } from '../ui/Button'
-import { useToast } from '../ui/Toast'
+import { useToast } from '../ui/toastContext'
 import { ErrorState } from '../layout/ErrorState'
 import { Skeleton } from '../layout/Skeleton'
 import { InvoiceCard } from './InvoiceCard'
@@ -37,6 +37,8 @@ interface InvoiceTableProps {
   onSelect: (id: number) => void
 }
 
+/** What the debounced text inputs hold once every filter is cleared. */
+const EMPTY_TYPED = { search: '', minTotal: '', maxTotal: '' }
 const SKELETON_ROWS = 6
 const DEFAULT_FIRST_SORT: Partial<Record<SortField, 'asc' | 'desc'>> = { invoice_number: 'asc', audit_status: 'asc' }
 
@@ -90,9 +92,15 @@ function EmptyState({ filtered, onReset }: EmptyProps) {
         <p className="text-sm font-semibold text-slate-900">Todavía no hay facturas</p>
         <p className="mt-1 max-w-md text-sm text-slate-500">
           <FileUp aria-hidden className="mr-1 inline size-4 align-text-bottom" />
-          Sube un PDF o una imagen en la zona de arriba, o carga datos de ejemplo ejecutando{' '}
-          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">python scripts/seed.py</code>{' '}
-          desde la carpeta <code className="font-mono text-xs">backend</code>.
+          Sube un PDF o una imagen en la zona de arriba
+          {isHttpTransport() && (
+            <>
+              , o carga datos de ejemplo ejecutando{' '}
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">python scripts/seed.py</code>{' '}
+              desde la carpeta <code className="font-mono text-xs">backend</code>
+            </>
+          )}
+          .
         </p>
       </div>
     </div>
@@ -108,18 +116,19 @@ export function InvoiceTable({ selectedId, refreshKey, presetRequest, onSelect }
   const [handledRequest, setHandledRequest] = useState<number | null>(null)
   const [exporting, setExporting] = useState(false)
 
-  // Apply an external preset request during render so the very first fetch already uses it.
-  if (presetRequest && presetRequest.id !== handledRequest) {
-    setHandledRequest(presetRequest.id)
-    setValues({ ...EMPTY_FILTERS, preset: presetRequest.preset })
-  }
-
   // Text inputs hit the server only after the user pauses typing.
   const typed = useMemo(
     () => ({ search: values.search, minTotal: values.minTotal, maxTotal: values.maxTotal }),
     [values.search, values.minTotal, values.maxTotal],
   )
-  const settled = useDebouncedValue(typed, 300)
+  const [settled, flushSettled] = useDebouncedValue(typed, 300)
+
+  // Apply an external preset request during render so the very first fetch already uses it (and drops any old text).
+  if (presetRequest && presetRequest.id !== handledRequest) {
+    setHandledRequest(presetRequest.id)
+    setValues({ ...EMPTY_FILTERS, preset: presetRequest.preset })
+    flushSettled(EMPTY_TYPED)
+  }
   const filtersKey = JSON.stringify(toApiFilters({ ...values, ...settled }, sort))
   // Keyed by content so typing that has not reached the server yet does not trigger a refetch.
   const apiFilters = useMemo<InvoiceFilters>(() => JSON.parse(filtersKey), [filtersKey])
@@ -139,7 +148,10 @@ export function InvoiceTable({ selectedId, refreshKey, presetRequest, onSelect }
   if (data && data.pages > 0 && page > data.pages) setPage(data.pages)
 
   const patchValues = (patch: Partial<FilterValues>) => setValues((current) => ({ ...current, ...patch }))
-  const reset = () => setValues(EMPTY_FILTERS)
+  const reset = () => {
+    setValues(EMPTY_FILTERS)
+    flushSettled(EMPTY_TYPED)
+  }
 
   const toggleSort = (field: SortField) =>
     setSort((current) =>
@@ -173,7 +185,7 @@ export function InvoiceTable({ selectedId, refreshKey, presetRequest, onSelect }
     >
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4 sm:px-5">
         <div>
-          <h2 id="invoices-title" className="text-base font-semibold text-slate-900">
+          <h2 id="invoices-title" tabIndex={-1} className="text-base font-semibold text-slate-900 focus:outline-none">
             Facturas
           </h2>
           <p className="text-xs text-slate-500">Haz clic en una fila para ver la auditoría y exportar a Facturae.</p>
@@ -225,9 +237,6 @@ export function InvoiceTable({ selectedId, refreshKey, presetRequest, onSelect }
                     <SortHeader field="total_amount" label="Total" sort={sort} onSort={toggleSort} align="right" />
                     <SortHeader field="audit_status" label="Estado" sort={sort} onSort={toggleSort} />
                     <th scope="col" className="hidden px-3 py-2.5 text-left font-medium text-slate-500 lg:table-cell">Origen</th>
-                    <th scope="col" className="py-2.5 pl-3 pr-4">
-                      <span className="sr-only">Acciones</span>
-                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">

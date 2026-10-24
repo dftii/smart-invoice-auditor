@@ -14,7 +14,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models import ExtractionMethod
-from app.services import extractor as extractor_module
+from app.services.extraction import extractor as extractor_module
 from app.services.extractor import (
     ClaudeVisionStrategy,
     DemoParserStrategy,

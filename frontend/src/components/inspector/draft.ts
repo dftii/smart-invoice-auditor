@@ -1,8 +1,7 @@
 // Editable form model for the inspector: string fields, diffing against the loaded invoice, and PATCH payload building.
 import type { InvoiceDetail, InvoiceLineInput, InvoiceUpdate } from '../../types/api'
+import { decToNumber, decToString, parseDecimal } from '../../lib/decimal'
 import {
-  isValidDecimal,
-  parseDec,
   recalculateAmounts,
   sameDecimal,
   type FixTarget,
@@ -36,11 +35,33 @@ export interface InvoiceDraft {
   dir3_accounting_office: string
   dir3_managing_body: string
   dir3_processing_unit: string
+  payment_iban: string
   tax_base: string
   total_vat: string
   total_irpf: string
   total_amount: string
   lines: LineDraft[]
+}
+
+export function normalizeIban(value: string): string {
+  return value.replace(/\s+/g, '').toUpperCase()
+}
+
+/** Shape of an IBAN: 2 letters, 2 check digits and up to 30 alphanumeric characters (ES: 24 characters in total). */
+const IBAN_FORMAT = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/
+
+export function isIbanFormatValid(value: string): boolean {
+  const iban = normalizeIban(value)
+  return iban === '' || (IBAN_FORMAT.test(iban) && (!iban.startsWith('ES') || iban.length === 24))
+}
+
+/** ISO 13616 mod-97 check; used as a hint only, so test IBANs never block saving. */
+export function isIbanChecksumValid(value: string): boolean {
+  const iban = normalizeIban(value)
+  if (!IBAN_FORMAT.test(iban)) return false
+  const rearranged = iban.slice(4) + iban.slice(0, 4)
+  const digits = [...rearranged].map((char) => (/\d/.test(char) ? char : String(char.charCodeAt(0) - 55))).join('')
+  return BigInt(digits) % 97n === 1n
 }
 
 type TextField = Exclude<keyof InvoiceDraft, 'lines' | HeaderMoneyField | 'supplier_tax_id' | 'invoice_number' | 'issue_date' | 'buyer_country_code'>
@@ -58,9 +79,19 @@ const NULLABLE_TEXT_FIELDS: readonly TextField[] = [
   'dir3_accounting_office',
   'dir3_managing_body',
   'dir3_processing_unit',
+  'payment_iban',
 ]
 
 const MONEY_FIELDS: readonly HeaderMoneyField[] = ['tax_base', 'total_vat', 'total_irpf', 'total_amount']
+
+/** Numeric form fields are dot-decimal text ('plain' mode): see lib/decimal.ts. */
+function parseDec(value: string) {
+  return parseDecimal(value, 'plain')
+}
+
+function isValidDecimal(value: string): boolean {
+  return parseDec(value) !== null
+}
 
 let keyCounter = 0
 function nextKey(): string {
@@ -111,6 +142,7 @@ export function draftFromInvoice(invoice: InvoiceDetail): InvoiceDraft {
     dir3_accounting_office: invoice.dir3_accounting_office ?? '',
     dir3_managing_body: invoice.dir3_managing_body ?? '',
     dir3_processing_unit: invoice.dir3_processing_unit ?? '',
+    payment_iban: invoice.payment_iban ?? '',
     tax_base: invoice.tax_base,
     total_vat: invoice.total_vat,
     total_irpf: invoice.total_irpf,
@@ -188,13 +220,14 @@ export function isDirty(original: InvoiceDraft, current: InvoiceDraft): boolean 
   return Object.keys(buildUpdate(original, current).payload).length > 0
 }
 
+/** IBANs are compared and sent without spaces and in upper case; other text fields are only trimmed. */
+function normalizeText(field: TextField, value: string): string {
+  return field === 'payment_iban' ? normalizeIban(value) : value.trim()
+}
+
 function normalizeNumber(value: string): string {
   const parsed = parseDec(value)
-  if (parsed === null) return value.trim()
-  const text = (parsed.n < 0n ? -parsed.n : parsed.n).toString().padStart(parsed.s + 1, '0')
-  const integer = text.slice(0, text.length - parsed.s)
-  const fraction = text.slice(text.length - parsed.s)
-  return `${parsed.n < 0n ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`
+  return parsed === null ? value.trim() : decToString(parsed)
 }
 
 /** Only the fields that differ from the loaded invoice; `lines` is the full list and only present when something changed in it. */
@@ -212,7 +245,9 @@ export function buildUpdate(original: InvoiceDraft, current: InvoiceDraft): { pa
     payload.buyer_country_code = current.buyer_country_code.trim().toUpperCase()
   }
   for (const field of NULLABLE_TEXT_FIELDS) {
-    if (current[field].trim() !== original[field].trim()) payload[field] = current[field].trim() || null
+    const before = normalizeText(field, original[field])
+    const after = normalizeText(field, current[field])
+    if (after !== before) payload[field] = after || null
   }
   for (const field of MONEY_FIELDS) {
     if (!sameDecimal(current[field], original[field])) payload[field] = normalizeNumber(current[field])
@@ -245,6 +280,9 @@ export function validateDraft(draft: InvoiceDraft): string[] {
   if (!draft.invoice_number.trim()) problems.push('El número de factura es obligatorio.')
   if (!draft.issue_date) problems.push('La fecha de expedición es obligatoria.')
   if (!draft.supplier_tax_id.trim()) problems.push('El NIF/CIF del emisor es obligatorio.')
+  if (!isIbanFormatValid(draft.payment_iban)) {
+    problems.push('El IBAN no tiene un formato válido (por ejemplo ES91 2100 0418 4502 0005 1332).')
+  }
   if (!/^[A-Za-z]{3}$/.test(draft.buyer_country_code.trim())) {
     problems.push('El país del receptor debe ser un código de 3 letras (por ejemplo ESP).')
   }
@@ -261,7 +299,7 @@ export function validateDraft(draft: InvoiceDraft): string[] {
     }
     for (const field of ['discount_rate', 'vat_rate', 'irpf_rate'] as const) {
       const value = parseDec(line[field])
-      if (value === null || value.n < 0n || Number(value.n) / 10 ** value.s > 100) {
+      if (value === null || value.n < 0n || decToNumber(value) > 100) {
         problems.push(`${label}: «${LINE_LABELS[field]}» debe estar entre 0 y 100.`)
       }
     }
@@ -285,8 +323,3 @@ const LINE_LABELS = {
   vat_rate: 'Tipo de IVA',
   irpf_rate: 'Tipo de IRPF',
 } as const
-
-export function fullNumber(invoice: Pick<InvoiceDetail, 'invoice_series' | 'invoice_number'>): string {
-  const { invoice_series: series, invoice_number: number } = invoice
-  return series && !number.startsWith(series) ? `${series}-${number}` : number
-}

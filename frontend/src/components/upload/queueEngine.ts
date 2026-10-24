@@ -1,4 +1,4 @@
-import { ApiError, uploadInvoice } from '../../services/api'
+import { ApiError, isHttpTransport, uploadInvoice } from '../../services/api'
 import type { UploadResponse } from '../../types/api'
 import { activeStepIndex, isTerminal, type ProcessingStep, type UploadItem, type UploadPhase } from './types'
 import { validateFile } from './validation'
@@ -12,6 +12,8 @@ interface Run {
   controller: AbortController
   timers: Set<number>
   processStart: number | null
+  /** The whole request body has been sent: from now on the server may create the invoice even if we give up. */
+  uploadSent: boolean
   skip: boolean
 }
 
@@ -22,6 +24,8 @@ export interface QueueEngineDeps {
 export interface QueueEngine {
   mount: () => void
   setOnUploaded: (listener: (result: UploadResponse) => void) => void
+  /** Called when a request was abandoned after it had been sent: the invoice list may have changed. */
+  setOnMaybeCreated: (listener: () => void) => void
   dispose: () => void
   addFiles: (files: File[]) => void
   cancel: (id: number) => void
@@ -31,6 +35,8 @@ export interface QueueEngine {
   skipAll: () => void
   clearFinished: () => void
 }
+
+const MAYBE_CREATED_HINT = 'La factura puede haberse registrado en el servidor: compruébalo en la tabla antes de reintentar.'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -56,6 +62,7 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
   let busy = false
   let nextId = 1
   let notify: (result: UploadResponse) => void = () => {}
+  let notifyMaybeCreated: () => void = () => {}
   const runs = new Map<number, Run>()
   const skipWhenQueued = new Set<number>()
 
@@ -115,6 +122,7 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
   }
 
   const beginProcessing = (id: number, run: Run) => {
+    run.uploadSent = true
     if (run.processStart !== null) return
     run.processStart = Date.now()
     setPhase(id, { kind: 'processing', step: 'scanning', result: null })
@@ -156,10 +164,22 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
     if (phase) {
       const failedStep = Math.max(0, activeStepIndex(phase))
       const aborted = error instanceof DOMException && error.name === 'AbortError'
-      setPhase(
-        id,
-        aborted ? { kind: 'cancelled', failedStep } : { kind: 'error', message: errorMessage(error), failedStep, retryable: true },
-      )
+      // Once the body is sent the server may finish (and store) the invoice whatever happens to the response here.
+      const gatewayGaveUp = error instanceof ApiError && (error.status === 0 || error.status === 502 || error.status === 504)
+      const maybeCreated = run.uploadSent && (aborted || gatewayGaveUp)
+      if (aborted) {
+        setPhase(id, { kind: 'cancelled', failedStep, maybeCreated })
+      } else {
+        const message = errorMessage(error)
+        setPhase(id, {
+          kind: 'error',
+          message: maybeCreated ? `${message} ${MAYBE_CREATED_HINT}` : message,
+          failedStep,
+          retryable: true,
+          maybeCreated,
+        })
+      }
+      if (maybeCreated) notifyMaybeCreated()
     }
     pump()
   }
@@ -170,6 +190,8 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       controller: new AbortController(),
       timers: new Set(),
       processStart: null,
+      // Without a network upload (in-process transport) the work starts immediately: nothing is "not yet sent".
+      uploadSent: !isHttpTransport(),
       skip: skipWhenQueued.delete(item.id),
     }
     runs.set(item.id, run)
@@ -230,6 +252,10 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       notify = listener
     },
 
+    setOnMaybeCreated(listener) {
+      notifyMaybeCreated = listener
+    },
+
     dispose() {
       alive = false
       busy = false
@@ -263,7 +289,7 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       const phase = phaseOf(id)
       if (phase?.kind === 'queued') {
         skipWhenQueued.delete(id)
-        setPhase(id, { kind: 'cancelled', failedStep: 0 })
+        setPhase(id, { kind: 'cancelled', failedStep: 0, maybeCreated: false })
         return
       }
       if (phase?.kind === 'uploading' || (phase?.kind === 'processing' && !phase.result)) runs.get(id)?.controller.abort()

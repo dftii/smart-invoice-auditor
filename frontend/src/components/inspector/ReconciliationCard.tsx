@@ -1,6 +1,7 @@
 import { CircleAlert, CircleCheck, Scale } from 'lucide-react'
 import { cn } from '../../lib/cn'
-import { centsToDecimal, formatEur, formatPercent } from '../../lib/format'
+import { centsToDecimal } from '../../lib/decimal'
+import { formatEur, formatPercent } from '../../lib/format'
 import type { Reconciliation, TaxTotal } from './reconcile'
 
 interface ReconciliationCardProps {
@@ -40,7 +41,10 @@ function roundingNote(label: string, tax: TaxTotal): string | null {
 
 export function ReconciliationCard({ data, preview = false }: ReconciliationCardProps) {
   const diff = data.totalDiff
-  const partialMismatch = data.totalBalanced && !data.fullyBalanced
+  const lineErrors = data.lineIssues.length > 0
+  // Header totals agree with each other and with the recomputed lines, but some line is wrong.
+  const linesMismatch = data.hasLines && data.totalsBalanced && lineErrors
+  const partialMismatch = data.totalBalanced && !data.totalsBalanced
   const rows = [
     { label: 'Base imponible', calculated: data.base.calculated, declared: data.base.declared },
     { label: 'IVA', calculated: data.vat.calculated, declared: data.vat.declared },
@@ -50,7 +54,7 @@ export function ReconciliationCard({ data, preview = false }: ReconciliationCard
   const notes = [roundingNote('El IVA', data.vat), roundingNote('El IRPF', data.irpf)].filter(Boolean)
   const vatGroups = data.vat.groups.filter((group) => group.rate > 0 && group.base !== 0)
 
-  const tone = !data.hasLines ? 'amber' : data.fullyBalanced ? 'green' : partialMismatch ? 'amber' : 'red'
+  const tone = !data.hasLines ? 'amber' : data.fullyBalanced ? 'green' : linesMismatch || partialMismatch ? 'amber' : 'red'
 
   return (
     <section
@@ -68,7 +72,7 @@ export function ReconciliationCard({ data, preview = false }: ReconciliationCard
           )}
         </h3>
         <p
-          key={`${data.totalDiff}-${data.fullyBalanced}`}
+          key={`${data.totalDiff}-${data.fullyBalanced}-${data.totalsBalanced}`}
           role="status"
           className={cn(
             'inline-flex animate-pop-in items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold ring-1 ring-inset',
@@ -86,9 +90,11 @@ export function ReconciliationCard({ data, preview = false }: ReconciliationCard
             ? 'Sin líneas que comprobar'
             : tone === 'green'
               ? 'Cuadra al céntimo'
-              : partialMismatch
-                ? 'El total cuadra, pero hay importes parciales distintos'
-                : `Descuadre: ${eur(Math.abs(diff))}`}
+              : linesMismatch
+                ? 'Totales cuadran, pero hay errores en líneas'
+                : partialMismatch
+                  ? 'El total cuadra, pero hay importes parciales distintos'
+                  : `Descuadre: ${eur(Math.abs(diff))}`}
         </p>
       </div>
 
@@ -165,6 +171,12 @@ export function ReconciliationCard({ data, preview = false }: ReconciliationCard
         </table>
       </div>
 
+      {data.hasLines && lineErrors && (
+        <p className="mt-3 text-xs text-amber-800">
+          {data.lineIssues.length === 1 ? 'Línea con errores' : 'Líneas con errores'} en la base, el IVA, el IRPF o los
+          tipos: {data.lineIssues.join(', ')}.
+        </p>
+      )}
       {data.hasLines && data.base.declaredLines !== data.base.calculated && (
         <p className="mt-3 text-xs text-slate-500">
           Las bases escritas en las líneas suman {eur(data.base.declaredLines)}; recalculadas con cantidad × precio −

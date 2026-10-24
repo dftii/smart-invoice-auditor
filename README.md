@@ -15,11 +15,17 @@
   <img src="https://img.shields.io/badge/Tailwind%20CSS-v4-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS v4" />
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker" />
   <img src="https://img.shields.io/badge/Facturae-3.2.2-1E3A8A" alt="Facturae 3.2.2" />
-  <img src="https://img.shields.io/badge/tests-1172%20passed-brightgreen" alt="tests 1172 passed" />
+  <img src="https://img.shields.io/badge/tests-1264%20backend%20%C2%B7%2080%20frontend-brightgreen" alt="tests: 1264 backend, 80 frontend" />
+  <a href="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml"><img src="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License MIT" />
 </p>
 
 <p align="center">
+  <a href="https://dftii.github.io/smart-invoice-auditor/"><strong>▶ Probar la demo en vivo</strong></a> — el backend Python real se ejecuta en tu navegador con WebAssembly, sin instalar nada.
+</p>
+
+<p align="center">
+  <a href="#demo-en-vivo">Demo en vivo</a> ·
   <a href="#el-problema">El problema</a> ·
   <a href="#la-solución">La solución</a> ·
   <a href="#arquitectura">Arquitectura</a> ·
@@ -32,6 +38,18 @@
 </p>
 
 ---
+
+## Demo en vivo
+
+**https://dftii.github.io/smart-invoice-auditor/**
+
+GitHub Pages solo sirve archivos estáticos, así que la demo no llama a ningún servidor: descarga [Pyodide](https://pyodide.org) (CPython compilado a WebAssembly) y ejecuta **el mismo backend FastAPI de este repositorio** dentro de un Web Worker, con SQLite en memoria y las 25 facturas del seed. No es una API simulada: el auditor, el exportador Facturae y la base de datos son el código Python real.
+
+- La primera carga descarga unos 14 MB y tarda unos 10 s; las siguientes, unos 5 s gracias a la caché.
+- Los datos viven en memoria y se reinician al recargar la página.
+- En la demo no hay Modo IA ni firma XAdES (no hay claves ni certificados en el navegador).
+
+El build de la demo (`npm run build:demo` en `frontend/`) empaqueta `backend/app` y las ruedas Python puras en `public/demo/`, y el workflow `.github/workflows/pages.yml` lo publica en cada push a `main`.
 
 ## El problema
 
@@ -46,7 +64,7 @@ En muchas pymes y departamentos de contabilidad, cada factura recibida se teclea
 SmartInvoice-FACe Auditor convierte una factura en PDF o imagen en datos auditados en segundos:
 
 - **Extracción.** Con Claude Vision (Modo IA) o con un parser local que no hace llamadas externas (Modo Demo).
-- **Auditoría.** 17 reglas fiscales que comparan cada importe al céntimo, con un registro de cada comprobación, también de las superadas.
+- **Auditoría.** 18 reglas fiscales que comparan cada importe al céntimo, con un registro de cada comprobación, también de las superadas.
 - **Exportación.** XML Facturae 3.2.2 con firma XAdES opcional, y CSV preparado para abrirse en Excel.
 - **Panel.** Indicadores, tabla filtrable e inspector para revisar, corregir, volver a auditar y exportar cada factura.
 
@@ -239,15 +257,15 @@ Ambos modos devuelven el mismo formato de resultado, así que las reglas de audi
 Notas sobre el Modo Demo:
 
 - Funciona con los PDF generados por `generate_sample_invoices.py` y con PDF de texto que sigan un diseño parecido.
-- Si el fichero no contiene texto utilizable (imágenes o escaneos), genera una factura sintética determinista a partir del hash del fichero. Sirve para probar el flujo completo, pero **sus datos no proceden del documento**.
+- Si el fichero no contiene texto utilizable (imágenes o escaneos), genera una factura sintética determinista a partir del hash del fichero. Sirve para probar el flujo completo, pero **sus datos no proceden del documento**: la factura se marca como sintética (`is_synthetic`), la regla `SYNTHETIC_DATA` la deja en *Discrepancia* y el exportador se niega a generar su XML.
 
-En Modo IA, si la llamada a la API falla o supera `AI_TIMEOUT_SECONDS`, la extracción pasa al Modo Demo cuando `AI_FALLBACK_TO_DEMO=true` (valor por defecto) y se añade un aviso al resultado.
+En Modo IA, si la llamada a la API falla o supera `AI_TIMEOUT_SECONDS`, la subida responde 422. Solo con `AI_FALLBACK_TO_DEMO=true` se recurre al Modo Demo, y el resultado lleva un aviso.
 
 ## Auditoría fiscal
 
 ### Reglas de auditoría
 
-Cada factura se evalúa con las siguientes 17 reglas. Cada una genera un registro en el log de validaciones: los fallos con su severidad y los aciertos como `INFO`.
+Cada factura se evalúa con las siguientes 18 reglas. Cada una genera un registro en el log de validaciones: los fallos con su severidad y los aciertos como `INFO`.
 
 | Código de regla | Qué comprueba | Severidad |
 |---|---|---|
@@ -268,6 +286,7 @@ Cada factura se evalúa con las siguientes 17 reglas. Cada una genera un registr
 | `CURRENCY` | La moneda es EUR, requisito para FACe. | AVISO |
 | `FACE_DIR3` | Están informados los tres códigos DIR3 necesarios para enviar a FACe. | AVISO |
 | `FACE_PARTY_DATA` | Emisor y receptor tienen nombre, dirección, código postal de 5 dígitos, población y provincia (exigidos por Facturae). | AVISO |
+| `SYNTHETIC_DATA` | La factura no se generó con datos sintéticos del Modo Demo (imágenes sin texto). | ERROR |
 
 Las comparaciones de importes son exactas al céntimo. Los mensajes de error indican el valor esperado y el encontrado, por ejemplo: *«Línea 2: la base imponible debería ser 150.00 € (3 × 50.00 €) y figura 155.00 € (diferencia 5.00 €)»*.
 
@@ -446,7 +465,7 @@ Para parar los servicios, usa `docker compose --profile mysql down`. Añade `-v`
 
 ## Tests y cobertura
 
-El backend tiene **1172 tests** y una cobertura de alrededor del **96 %**. Desde el directorio `backend/`:
+El backend tiene **1264 tests** y una cobertura de alrededor del **96 %**; el frontend, **80 tests** con vitest (`npm run test` en `frontend/`). Desde el directorio `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -549,11 +568,14 @@ smart-invoice-auditor/
 
 - **Fase 1 (completada):** backend con extracción, auditoría, exportación Facturae y CSV, API REST y contenedores.
 - **Fase 2 (completada):** frontend con panel en React, Vite y TypeScript para subir facturas, revisar auditorías y descargar exportables.
-- **Fase 3 (en curso):** despliegue y CI.
-  - Pipeline de integración continua con GitHub Actions.
+- **Fase 3 (completada):** CI con GitHub Actions (backend en Python 3.11 y 3.12, frontend y build de Docker), demo en GitHub Pages con el backend en WebAssembly y autenticación opcional por API key (`API_KEY`, cabecera `X-API-Key`).
+- **Siguientes pasos:**
   - OCR para PDF escaneados.
   - Envío de las facturas firmadas a FACe mediante su servicio web.
-  - Autenticación y control de acceso para el panel y la API.
+  - Usuarios y roles en lugar de una única API key.
+  - Migraciones versionadas con Alembic.
+
+**Fuera de alcance por ahora:** facturas rectificativas (importes negativos; se rechazan con un mensaje claro), IGIC (Canarias), IPSI (Ceuta y Melilla), recargo de equivalencia y emisores no residentes en España.
 
 ## Autor
 
@@ -574,9 +596,11 @@ Distribuido bajo la licencia MIT. Consulta el fichero [LICENSE](LICENSE) para m�
 **What it does.**
 
 - **Extraction with two strategies:** Claude Vision when `ANTHROPIC_API_KEY` is set (AI mode), or a local parser based on pypdf and regular expressions with no external calls (demo mode). Both return the same format.
-- **17 audit rules** that compare every amount to the cent: tax ID validation for NIF, NIE and CIF, line arithmetic, VAT at 21, 10 and 4 percent, IRPF withholdings, totals, duplicate detection, currency, DIR3 codes and party data required by Facturae. Every check is logged, including the passed ones.
+- **18 audit rules** that compare every amount to the cent: tax ID validation for NIF, NIE and CIF, line arithmetic, VAT at 21, 10 and 4 percent, IRPF withholdings, totals, duplicate detection, currency, DIR3 codes and party data required by Facturae. Every check is logged, including the passed ones.
 - **Facturae 3.2.2 export** with optional XAdES signature (PKCS#12 certificate), and CSV export for Excel.
 - **Web dashboard** built with React 19, TypeScript and Tailwind CSS v4: KPI cards, drag-and-drop upload with a live audit reveal, a filterable invoice table with status badges, and an inspector to reconcile, correct, re-audit and export each invoice.
+
+**Live demo:** https://dftii.github.io/smart-invoice-auditor/ runs the real FastAPI backend inside the browser with Pyodide (WebAssembly), with an in-memory SQLite database seeded with 25 invoices. No server involved.
 
 **Quick start with Docker:**
 
@@ -588,8 +612,8 @@ docker compose --profile seed run --rm seed
 
 Then open http://localhost:8080 for the web interface and http://localhost:8000/docs for the API.
 
-**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1172 tests with about 96 percent coverage.
+**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1264 tests (about 96 percent coverage) and the frontend 80 vitest tests; GitHub Actions runs them on every push.
 
-**Roadmap.** GitHub Actions CI, OCR for scanned PDFs, submission of signed invoices to the FACe web service, and authentication.
+**Roadmap.** OCR for scanned PDFs, submission of signed invoices to the FACe web service, users and roles, and Alembic migrations.
 
 **Author:** Alex Guillamón Roca ([github.com/dftii](https://github.com/dftii)). **License:** MIT.

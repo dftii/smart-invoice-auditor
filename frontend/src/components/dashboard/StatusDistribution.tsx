@@ -8,7 +8,8 @@ interface Segment {
   preset: StatusPreset
   label: string
   count: number
-  amount: string
+  /** Total of the invoices in this status; null when the API does not provide it. */
+  amount: string | null
   bar: string
   dot: string
 }
@@ -21,55 +22,33 @@ interface StatusDistributionProps {
 export function StatusDistribution({ stats, onFilter }: StatusDistributionProps) {
   const segments = useMemo<Segment[]>(() => {
     const find = (status: string) => stats.by_status.find((item) => item.status === status)
-    const validated = find('VALIDATED')
-    const validatedCount = validated?.count ?? 0
-    const exported = Math.min(stats.exported_to_face, validatedCount)
-    const validatedAmount = Number(validated?.total_amount ?? 0)
-    // Exported invoices are a subset of the validated ones; split the amount proportionally for display only.
-    const exportedAmount = validatedCount > 0 ? (validatedAmount * exported) / validatedCount : 0
+    const status = (preset: StatusPreset, label: string, key: string, color: string): Segment => ({
+      preset,
+      label,
+      count: find(key)?.count ?? 0,
+      amount: find(key)?.total_amount ?? '0',
+      bar: color,
+      dot: color,
+    })
     return [
-      {
-        preset: 'VALIDATED',
-        label: 'Cuadra',
-        count: validatedCount - exported,
-        amount: String(validatedAmount - exportedAmount),
-        bar: 'bg-emerald-500',
-        dot: 'bg-emerald-500',
-      },
-      {
-        preset: 'EXPORTED',
-        label: 'XML FACe generado',
-        count: exported,
-        amount: String(exportedAmount),
-        bar: 'bg-blue-500',
-        dot: 'bg-blue-500',
-      },
-      {
-        preset: 'DISCREPANCY',
-        label: 'Discrepancia',
-        count: find('DISCREPANCY')?.count ?? 0,
-        amount: find('DISCREPANCY')?.total_amount ?? '0',
-        bar: 'bg-red-500',
-        dot: 'bg-red-500',
-      },
-      {
-        preset: 'DUPLICATE',
-        label: 'Duplicada',
-        count: find('DUPLICATE')?.count ?? 0,
-        amount: find('DUPLICATE')?.total_amount ?? '0',
-        bar: 'bg-amber-500',
-        dot: 'bg-amber-500',
-      },
-      {
-        preset: 'PENDING',
-        label: 'Pendiente',
-        count: find('PENDING')?.count ?? 0,
-        amount: find('PENDING')?.total_amount ?? '0',
-        bar: 'bg-slate-400',
-        dot: 'bg-slate-400',
-      },
+      status('VALIDATED', 'Cuadra', 'VALIDATED', 'bg-emerald-500'),
+      status('DISCREPANCY', 'Discrepancia', 'DISCREPANCY', 'bg-red-500'),
+      status('DUPLICATE', 'Duplicada', 'DUPLICATE', 'bg-amber-500'),
+      status('PENDING', 'Pendiente', 'PENDING', 'bg-slate-400'),
     ]
   }, [stats])
+
+  // The bar is a partition by audit status. "XML FACe generado" counts invoices whatever their current status
+  // (exactly the KPI's `exported_to_face`), so it is listed apart and is not part of the bar.
+  const exported: Segment = {
+    preset: 'EXPORTED',
+    label: 'XML FACe generado',
+    count: stats.exported_to_face,
+    amount: null,
+    bar: 'bg-blue-500',
+    dot: 'bg-blue-500',
+  }
+  const rows = [...segments, exported]
 
   const total = segments.reduce((sum, segment) => sum + segment.count, 0)
 
@@ -97,8 +76,8 @@ export function StatusDistribution({ stats, onFilter }: StatusDistributionProps)
           </div>
 
           <ul className="mt-5 space-y-1">
-            {segments.map((segment) => (
-              <li key={segment.preset}>
+            {rows.map((segment) => (
+              <li key={segment.preset} className={segment === exported ? 'mt-2 border-t border-slate-100 pt-2' : undefined}>
                 <button
                   type="button"
                   disabled={segment.count === 0 || segment.preset === 'PENDING'}
@@ -108,7 +87,9 @@ export function StatusDistribution({ stats, onFilter }: StatusDistributionProps)
                   <span aria-hidden className={`size-2.5 shrink-0 rounded-full ${segment.dot}`} />
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="text-slate-700">{segment.label}</span>
-                    <span className="text-xs text-slate-400">{formatEur(segment.amount)}</span>
+                    <span className="text-xs text-slate-400">
+                      {segment.amount === null ? 'Con XML generado, sea cual sea su estado actual' : formatEur(segment.amount)}
+                    </span>
                   </span>
                   <span className="w-8 text-right font-semibold text-slate-900">{segment.count}</span>
                   <span className="w-14 text-right text-xs text-slate-500">

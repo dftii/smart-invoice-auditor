@@ -27,8 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.db.database import SessionLocal, build_engine, init_db
-from app.db.database import engine as default_engine
+from app.db.database import build_engine, get_engine, get_session_factory, init_db
 from app.models import AuditStatus, Invoice, PersonType, Severity, Supplier
 from app.schemas import AuditReport, InvoiceCreate, InvoiceLineCreate, SupplierCreate
 from app.services.auditor import (
@@ -944,7 +943,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
         label = make_url(args.database_url).render_as_string(hide_password=True)
     else:
-        engine, factory = default_engine, SessionLocal
+        engine, factory = get_engine(), get_session_factory()
         label = engine.url.render_as_string(hide_password=True)
 
     try:

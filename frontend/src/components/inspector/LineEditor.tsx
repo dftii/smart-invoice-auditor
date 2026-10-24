@@ -1,5 +1,6 @@
 import { Calculator, Trash2 } from 'lucide-react'
-import { centsToDecimal, formatEur } from '../../lib/format'
+import { formatEur } from '../../lib/format'
+import { centsToDecimal } from '../../lib/decimal'
 import { Button } from '../ui/Button'
 import type { LineDraft } from './draft'
 import { SelectInput, TextInput } from './Field'

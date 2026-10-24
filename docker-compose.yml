@@ -5,10 +5,14 @@
 #   Interfaz web en http://localhost:8080
 #   API y documentación interactiva en http://localhost:8000/docs
 #
+# PUERTOS: backend (8000) y mysql (3306) solo escuchan en 127.0.0.1 del equipo anfitrión, no en la red local.
+# El frontend (8080) escucha en todas las interfaces; cámbialo a "127.0.0.1:8080:8080" si no lo necesitas en la LAN.
+#
 # FRONTEND (servicio "frontend", puerto 8080):
-#   nginx sirve la SPA compilada y reenvía /api/ y /health al backend por la red interna de Compose.
-#   El navegador solo necesita el puerto 8080 para la interfaz. El frontend arranca cuando el
-#   backend supera su healthcheck, porque nginx resuelve el host "backend" al iniciarse.
+#   nginx sirve la SPA compilada y reenvía /api/, /health, /docs, /redoc y /openapi.json al backend
+#   por la red interna de Compose. El navegador solo necesita el puerto 8080 para la interfaz.
+#   nginx resuelve el host "backend" con el DNS de Docker en cada petición (no al arrancar), así que
+#   el contenedor arranca aunque el backend todavía no exista; depends_on sigue esperando a su healthcheck.
 #   Para desarrollo con recarga en caliente usa "npm run dev" en frontend/ (ver README).
 #
 # CONFIGURACIÓN:
@@ -16,6 +20,10 @@
 #   - .env en la raíz (copia de .env.example) sustituye las variables de este fichero
 #     (DATABASE_URL, MYSQL_*). Compose aplica "environment" después de "env_file", así que
 #     DATABASE_URL de la raíz o del shell prevalece sobre la de backend/.env dentro de Docker.
+#
+# IMAGEN DEL BACKEND: el servicio backend construye la imagen "smartinvoice-backend:local" y el servicio seed
+# la reutiliza sin reconstruirla. Si ejecutas seed antes de haber construido la imagen, primero ejecuta
+# "docker compose build backend" (o "docker compose up --build -d backend").
 #
 # DATOS DE DEMOSTRACIÓN (servicio seed, perfil "seed"):
 #   docker compose --profile seed run --rm seed
@@ -37,16 +45,18 @@
 #      (añade -v para borrar también los volúmenes de datos; es irreversible).
 #
 # Para ejecutar el backend en local con MySQL (sin Docker) usa en backend/.env el host
-# "localhost" y el puerto publicado 3306 del servicio mysql.
+# "localhost" y el puerto publicado 3306 del servicio mysql (solo accesible desde este equipo).
 #
 # Los datos de SQLite y las facturas subidas se guardan en el volumen "backend-data".
 
 services:
   backend:
     build: ./backend
+    image: smartinvoice-backend:local
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Solo accesible desde este equipo (documentación en http://localhost:8000/docs).
+      - "127.0.0.1:8000:8000"
     env_file:
       - path: ./backend/.env
         required: false
@@ -75,7 +85,8 @@ services:
         condition: service_healthy
 
   seed:
-    build: ./backend
+    # Misma imagen que backend (ya construida por el servicio backend); no se vuelve a construir aquí.
+    image: smartinvoice-backend:local
     profiles: ["seed"]
     restart: "no"
     # El ENTRYPOINT fija el script; los argumentos de "run" (p. ej. --reset) se añaden al final.
@@ -108,7 +119,8 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     ports:
-      - "3306:3306"
+      # Solo accesible desde este equipo; MySQL no debe quedar expuesto en la red local.
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:

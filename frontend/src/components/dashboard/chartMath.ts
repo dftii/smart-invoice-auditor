@@ -1,5 +1,5 @@
 import type { MonthlyTotal } from '../../types/api'
-import { centsToDecimal, toCents } from '../../lib/format'
+import { centsToDecimal } from '../../lib/decimal'
 
 const compactEur = new Intl.NumberFormat('es-ES', {
   style: 'currency',
@@ -56,8 +56,4 @@ export function lastMonths(monthly: MonthlyTotal[], count = 12, now = new Date()
     )
   }
   return result
-}
-
-export function sumCents(values: string[]): number {
-  return values.reduce((sum, value) => sum + toCents(value), 0)
 }

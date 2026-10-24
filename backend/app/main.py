@@ -8,13 +8,16 @@ from typing import Annotated
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import ServiceUnavailableError, register_exception_handlers
+from app.core.limits import UploadSizeLimitMiddleware
 from app.core.logging import configure_logging
-from app.db.database import get_db, init_db
+from app.core.security import require_api_key, warn_if_signing_unprotected
+from app.db.database import get_db, init_db, make_session_factory
 from app.routers import invoices, stats, suppliers
 from app.schemas import HealthResponse
 from app.services.extractor import get_extractor
@@ -38,16 +41,22 @@ OPENAPI_TAGS = [
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    init_db()
+    try:
+        settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # read-only or virtual file system: uploads will fail later with a clear error
+        logger.warning("Could not create the upload directory %s: %s", settings.upload_dir, exc)
+    init_db(application.state.engine)
+    warn_if_signing_unprotected(settings)
     logger.info("%s %s started (extraction mode: %s)", settings.app_name, settings.app_version, get_extractor().mode)
     yield
 
 
-def create_app() -> FastAPI:
+def create_app(engine: Engine | None = None) -> FastAPI:
+    """Build the application. `engine` overrides the database (tests, embedded runtimes); by default the
+    engine comes from DATABASE_URL and is created lazily, so importing this module never opens a database."""
     settings = get_settings()
     application = FastAPI(
         title=settings.app_name,
@@ -56,6 +65,9 @@ def create_app() -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
     )
+    application.state.engine = engine
+    application.state.session_factory = make_session_factory(engine) if engine is not None else None
+    application.add_middleware(UploadSizeLimitMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -66,7 +78,7 @@ def create_app() -> FastAPI:
     )
     register_exception_handlers(application)
     for router in (invoices.router, suppliers.router, stats.router):
-        application.include_router(router, prefix=settings.api_prefix)
+        application.include_router(router, prefix=settings.api_prefix, dependencies=[Depends(require_api_key)])
 
     @application.get("/health", response_model=HealthResponse, tags=["Sistema"], summary="Comprobar el estado")
     def health(db: Annotated[Session, Depends(get_db)]) -> HealthResponse:
@@ -79,7 +91,7 @@ def create_app() -> FastAPI:
             status="ok",
             app=settings.app_name,
             version=settings.app_version,
-            database=db.get_bind().dialect.name,
+            database="ok",
             extraction_mode=get_extractor().mode,
         )
 

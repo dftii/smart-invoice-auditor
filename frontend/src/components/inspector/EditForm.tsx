@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react'
 import { Calculator, Info, Plus } from 'lucide-react'
-import { centsToDecimal, formatEur } from '../../lib/format'
+import { formatEur } from '../../lib/format'
+import { centsToDecimal } from '../../lib/decimal'
 import { Button } from '../ui/Button'
-import { blankLine, recalculateDraft, type InvoiceDraft } from './draft'
+import { blankLine, isIbanChecksumValid, isIbanFormatValid, recalculateDraft, type InvoiceDraft } from './draft'
 import { TextInput } from './Field'
 import { LineEditor } from './LineEditor'
 import { parseCents, type Reconciliation } from './reconcile'
@@ -27,6 +28,13 @@ function Section({ title, description, action, children }: { title: string; desc
       {children}
     </section>
   )
+}
+
+function ibanHint(value: string): ReactNode {
+  if (!value.trim()) return <span className="text-slate-500">Formato: 2 letras de país, 2 dígitos de control y la cuenta (España: 24 caracteres).</span>
+  if (!isIbanFormatValid(value)) return <span className="text-red-600">Formato no válido. Ejemplo: ES91 2100 0418 4502 0005 1332.</span>
+  if (!isIbanChecksumValid(value)) return <span className="text-amber-700">Los dígitos de control no coinciden; revisa el IBAN.</span>
+  return <span className="text-emerald-700">IBAN con formato correcto.</span>
 }
 
 export function EditForm({ draft, reconciliation, disabled, onChange }: EditFormProps) {
@@ -115,6 +123,21 @@ export function EditForm({ draft, reconciliation, disabled, onChange }: EditForm
           <TextInput label="Fecha de expedición" type="date" value={draft.issue_date} disabled={disabled} invalid={!draft.issue_date} onChange={(value) => set('issue_date', value)} />
           <TextInput label="Fecha de operación" type="date" value={draft.operation_date} disabled={disabled} onChange={(value) => set('operation_date', value)} />
           <TextInput label="Vencimiento" type="date" value={draft.due_date} disabled={disabled} onChange={(value) => set('due_date', value)} />
+        </div>
+      </Section>
+
+      <Section title="Pago" description="Cuenta a la que se paga la factura (opcional).">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <TextInput
+            label="IBAN"
+            value={draft.payment_iban}
+            disabled={disabled}
+            invalid={!isIbanFormatValid(draft.payment_iban)}
+            maxLength={42}
+            placeholder="ES91 2100 0418 4502 0005 1332"
+            onChange={(value) => set('payment_iban', value.toUpperCase())}
+            hint={ibanHint(draft.payment_iban)}
+          />
         </div>
       </Section>
 

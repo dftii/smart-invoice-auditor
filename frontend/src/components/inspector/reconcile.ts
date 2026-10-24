@@ -1,9 +1,25 @@
 // Pure invoice arithmetic for the inspector. Mirrors backend/app/services/auditor.py:
 // every amount is computed in integer cents with ROUND_HALF_UP (ties away from zero), no floats involved.
-import { centsToDecimal } from '../../lib/format'
+// Inputs are first quantized like the database columns (quantity 4 decimals, unit price 6, rates 2).
+import {
+  centsToDecimal,
+  decEquals,
+  decKey,
+  decToNumber,
+  parseDecimal,
+  quantize,
+  roundDec,
+  ZERO,
+  type Dec,
+} from '../../lib/decimal'
 
 export const VAT_RATE_OPTIONS = [21, 10, 4, 0] as const
 export const IRPF_RATE_OPTIONS = [0, 1, 2, 7, 15, 19] as const
+
+/** Decimal places the backend stores (models.py: QUANTITY / UNIT_PRICE / RATE). */
+const QUANTITY_SCALE = 4
+const UNIT_PRICE_SCALE = 6
+const RATE_SCALE = 2
 
 /** Minimal shape needed to reason about one line; both API lines and form drafts satisfy it. */
 export interface LineLike {
@@ -27,86 +43,43 @@ export interface TotalsLike {
 
 // ----------------------------------------------------------------------------------------- decimals
 
-/** Exact decimal: value = n / 10^s. */
-interface Dec {
-  n: bigint
-  s: number
-}
-
-const ZERO: Dec = { n: 0n, s: 0 }
-const DECIMAL_PATTERN = /^([+-])?(\d*)(?:\.(\d*))?$/
-
-function pow10(exponent: number): bigint {
-  return 10n ** BigInt(exponent)
-}
-
-/** Parses "12.5", "12,5" or a number; null when the text is not a plain decimal. */
-export function parseDec(value: string | number | null | undefined): Dec | null {
-  if (value === null || value === undefined) return null
-  const text = (typeof value === 'number' ? value.toFixed(8) : value).trim().replace(',', '.')
-  const match = DECIMAL_PATTERN.exec(text)
-  if (!match) return null
-  const [, sign, integer = '', fraction = ''] = match
-  if (integer === '' && fraction === '') return null
-  const n = BigInt(`${integer || '0'}${fraction}`)
-  return { n: sign === '-' ? -n : n, s: fraction.length }
+/** API strings and form fields are dot-decimal ('plain' mode): "2.125" is a quantity, not 2125. */
+function parseDec(value: string | number | null | undefined): Dec | null {
+  return parseDecimal(value, 'plain')
 }
 
 function decOrZero(value: string | number | null | undefined): Dec {
   return parseDec(value) ?? ZERO
 }
 
-export function isValidDecimal(value: string): boolean {
-  return parseDec(value) !== null
-}
-
-/** Rounds to `scale` decimals, ROUND_HALF_UP (ties away from zero) like Python's Decimal. */
-function roundToScale(value: Dec, scale: number): bigint {
-  if (value.s <= scale) return value.n * pow10(scale - value.s)
-  const divisor = pow10(value.s - scale)
-  const magnitude = value.n < 0n ? -value.n : value.n
-  let quotient = magnitude / divisor
-  if ((magnitude % divisor) * 2n >= divisor) quotient += 1n
-  return value.n < 0n ? -quotient : quotient
+/** A rate as the database keeps it: 2 decimals. */
+function rateDec(value: string | number | null | undefined): Dec {
+  return quantize(decOrZero(value), RATE_SCALE)
 }
 
 /** A decimal string as integer cents (the backend's `_round`). Invalid text counts as 0. */
 export function parseCents(value: string | number | null | undefined): number {
-  return Number(roundToScale(decOrZero(value), 2))
-}
-
-function toNumberValue(value: Dec): number {
-  return Number(value.n) / 10 ** value.s
-}
-
-/** Canonical grouping key so that "21", "21.0" and "21.00" fall in the same rate group. */
-function rateKey(value: Dec): string {
-  let { n, s } = value
-  while (s > 0 && n % 10n === 0n) {
-    n /= 10n
-    s -= 1
-  }
-  return `${n}/${s}`
+  return Number(roundDec(decOrZero(value), 2))
 }
 
 export function rateValue(text: string): number {
-  return toNumberValue(decOrZero(text))
+  return decToNumber(rateDec(text))
 }
 
 /** `cents * rate / 100`, rounded to a whole number of cents. */
 export function percentOfCents(cents: number, rate: string | number): number {
-  const parsed = decOrZero(rate)
-  return Number(roundToScale({ n: BigInt(Math.round(cents)) * parsed.n, s: parsed.s + 2 }, 0))
+  const parsed = rateDec(rate)
+  return Number(roundDec({ n: BigInt(Math.round(cents)) * parsed.n, s: parsed.s + 2 }, 0))
 }
 
 /** quantity × price × (1 − discount / 100), rounded to cents. */
 export function expectedLineBaseCents(line: Pick<LineLike, 'quantity' | 'unit_price' | 'discount_rate'>): number {
-  const quantity = decOrZero(line.quantity)
-  const price = decOrZero(line.unit_price)
-  const discount = decOrZero(line.discount_rate)
-  const factor = 100n * pow10(discount.s) - discount.n
+  const quantity = quantize(decOrZero(line.quantity), QUANTITY_SCALE)
+  const price = quantize(decOrZero(line.unit_price), UNIT_PRICE_SCALE)
+  const discount = rateDec(line.discount_rate)
+  const factor = 100n * 10n ** BigInt(discount.s) - discount.n
   const product: Dec = { n: quantity.n * price.n * factor, s: quantity.s + price.s + discount.s + 2 }
-  return Number(roundToScale(product, 2))
+  return Number(roundDec(product, 2))
 }
 
 // -------------------------------------------------------------------------------------------- lines
@@ -128,8 +101,7 @@ export interface LineAnalysis {
 }
 
 function inOptions(value: string, options: readonly number[]): boolean {
-  const parsed = parseDec(value)
-  return parsed !== null && options.includes(toNumberValue(parsed))
+  return parseDec(value) !== null && options.includes(rateValue(value))
 }
 
 export function analyzeLine(line: LineLike): LineAnalysis {
@@ -191,7 +163,11 @@ export interface Reconciliation {
   totalDiff: number
   /** The document total matches the recomputed one to the cent. */
   totalBalanced: boolean
-  /** Every component (base, VAT, IRPF, total) matches the recomputed value. */
+  /** Every header component (base, VAT, IRPF, total) matches the recomputed value. */
+  totalsBalanced: boolean
+  /** 1-based numbers of the lines whose base, VAT or IRPF amount is wrong, or whose VAT/IRPF rate is not allowed. */
+  lineIssues: number[]
+  /** Header totals AND every line are consistent: the only state shown as "Cuadra al céntimo". */
   fullyBalanced: boolean
   hasLines: boolean
 }
@@ -202,9 +178,9 @@ function taxTotal(
 ): TaxTotal {
   const groups = new Map<string, TaxGroup & { lineSum: number }>()
   for (const entry of entries) {
-    const parsed = decOrZero(entry.rate)
-    const key = rateKey(parsed)
-    const group = groups.get(key) ?? { rate: toNumberValue(parsed), base: 0, amount: 0, lineSum: 0 }
+    const parsed = rateDec(entry.rate)
+    const key = decKey(parsed)
+    const group = groups.get(key) ?? { rate: decToNumber(parsed), base: 0, amount: 0, lineSum: 0 }
     group.base += entry.base
     group.lineSum += entry.amount
     groups.set(key, group)
@@ -255,6 +231,14 @@ export function reconcile(source: TotalsLike): Reconciliation {
   const calculatedTotal = baseCalculated + vat.calculated - irpf.calculated
   const totalDiff = declaredTotal - calculatedTotal
   const totalBalanced = totalDiff === 0
+  const totalsBalanced =
+    totalBalanced &&
+    declaredBase === baseCalculated &&
+    declaredVat === vat.calculated &&
+    declaredIrpf === irpf.calculated
+  const lineIssues = lines.flatMap((line, index) =>
+    line.baseOk && line.vatOk && line.irpfOk && line.vatRateValid && line.irpfRateValid ? [] : [index + 1],
+  )
   return {
     lines,
     base: {
@@ -269,11 +253,9 @@ export function reconcile(source: TotalsLike): Reconciliation {
     headerTotal: declaredBase + declaredVat - declaredIrpf,
     totalDiff,
     totalBalanced,
-    fullyBalanced:
-      totalBalanced &&
-      declaredBase === baseCalculated &&
-      declaredVat === vat.calculated &&
-      declaredIrpf === irpf.calculated,
+    totalsBalanced,
+    lineIssues,
+    fullyBalanced: totalsBalanced && lineIssues.length === 0,
     hasLines: source.lines.length > 0,
   }
 }
@@ -332,24 +314,11 @@ export type FixTarget =
 const HEADER_FIELDS: readonly string[] = ['tax_base', 'total_vat', 'total_irpf', 'total_amount']
 const LINE_FIELDS: readonly string[] = ['line_base', 'vat_amount', 'irpf_amount']
 
-/** Parses "150.00", "150,00 €", "1.234,56" or "1,234.56" into a plain dot-decimal string with 2 decimals. */
+/** Parses "150.00", "150,00 €", "1.234,56" or "1,234.56" (see lib/decimal.ts) into a dot-decimal string with 2 decimals. */
 export function parseExpectedAmount(text: string | null | undefined): string | null {
   if (!text) return null
-  let cleaned = text.replace(/[€\s ]/g, '')
-  if (!/^[+-]?[\d.,]+$/.test(cleaned)) return null
-  const lastDot = cleaned.lastIndexOf('.')
-  const lastComma = cleaned.lastIndexOf(',')
-  if (lastDot !== -1 && lastComma !== -1) {
-    const decimalSeparator = lastDot > lastComma ? '.' : ','
-    const thousandsSeparator = decimalSeparator === '.' ? ',' : '.'
-    cleaned = cleaned.split(thousandsSeparator).join('').replace(decimalSeparator, '.')
-  } else if (lastComma !== -1) {
-    cleaned = cleaned.split(',').length > 2 ? cleaned.split(',').join('') : cleaned.replace(',', '.')
-  } else if (cleaned.split('.').length > 2) {
-    cleaned = cleaned.split('.').join('')
-  }
-  const parsed = parseDec(cleaned)
-  return parsed === null ? null : centsToDecimal(Number(roundToScale(parsed, 2)))
+  const parsed = parseDecimal(text, 'es')
+  return parsed === null ? null : centsToDecimal(Number(roundDec(parsed, 2)))
 }
 
 interface CheckLike {
@@ -378,5 +347,5 @@ export function sameDecimal(a: string, b: string): boolean {
   const left = parseDec(a)
   const right = parseDec(b)
   if (left === null || right === null) return a.trim() === b.trim()
-  return rateKey(left) === rateKey(right)
+  return decEquals(left, right)
 }

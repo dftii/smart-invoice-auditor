@@ -29,6 +29,7 @@ export function PartiesCard({ invoice }: { invoice: InvoiceDetail }) {
         <Item label="Oficina contable (DIR3)" value={invoice.dir3_accounting_office} />
         <Item label="Órgano gestor (DIR3)" value={invoice.dir3_managing_body} />
         <Item label="Unidad tramitadora (DIR3)" value={invoice.dir3_processing_unit} />
+        <Item label="IBAN de pago" value={invoice.payment_iban ?? null} />
       </dl>
     </section>
   )

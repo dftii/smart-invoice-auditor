@@ -4,10 +4,10 @@ import hashlib
 import logging
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, contains_eager, joinedload, selectinload
 
 from app.core.config import Settings
 from app.core.errors import ConflictError, InvalidInputError, NotFoundError
+from app.core.money import MAX_ABS_AMOUNT, QUANTITY_STEP, UNIT_PRICE_STEP, quantize, round_money
 from app.models import (
     AuditStatus,
     ExtractionMethod,
@@ -42,13 +43,12 @@ from app.schemas import (
     SupplierUpdate,
     SupplierWithStats,
 )
+from app.services.auditor import InvoiceAuditor, find_related_invoice_ids
 from app.services.tax_id import TaxIdValidation, normalize_tax_id, validate_tax_id
 
 logger = logging.getLogger(__name__)
 
-CENT = Decimal("0.01")
-QUANTITY_STEP = Decimal("0.0001")
-UNIT_PRICE_STEP = Decimal("0.000001")
+RECTIFYING_UNSUPPORTED = "Las facturas rectificativas no están soportadas todavía"
 RAW_TEXT_LIMIT = 20_000
 
 MIME_EXTENSIONS = {
@@ -71,6 +71,7 @@ NON_NULLABLE_UPDATE_FIELDS = {
     "issue_date",
     "supplier_tax_id",
     "buyer_country_code",
+    "currency",
     "tax_base",
     "total_vat",
     "total_irpf",
@@ -83,6 +84,8 @@ PLAIN_UPDATE_FIELDS = (
     "issue_date",
     "operation_date",
     "due_date",
+    "currency",
+    "payment_iban",
     "buyer_name",
     "buyer_tax_id",
     "buyer_address",
@@ -102,13 +105,21 @@ PLAIN_UPDATE_FIELDS = (
 
 def _quantize(value: Decimal, step: Decimal) -> Decimal:
     try:
-        return value.quantize(step, rounding=ROUND_HALF_UP)
+        return quantize(value, step)
     except InvalidOperation as exc:
         raise InvalidInputError(f"Importe fuera de rango: {value}") from exc
 
 
 def money(value: Decimal) -> Decimal:
-    return _quantize(value, CENT)
+    if not value.is_finite() or abs(value) >= MAX_ABS_AMOUNT:
+        raise InvalidInputError(f"Importe fuera de rango: {value}")
+    return round_money(value)
+
+
+def ensure_not_rectifying(*amounts: Decimal) -> None:
+    """Credit notes (negative totals) would be exported as ordinary invoices, so they are refused for now."""
+    if any(amount < 0 for amount in amounts):
+        raise InvalidInputError(RECTIFYING_UNSUPPORTED)
 
 
 def _clip(value: str | None, length: int) -> str | None:
@@ -282,6 +293,7 @@ def create_invoice_from_extraction(
     file_hash: str | None,
     file_path: str | None,
 ) -> Invoice:
+    ensure_not_rectifying(extraction.tax_base, extraction.total_vat, extraction.total_irpf, extraction.total_amount)
     supplier = upsert_supplier(db, extraction.supplier)
     buyer = extraction.buyer
     printed_tax_id = normalize_tax_id(extraction.supplier.tax_id) if extraction.supplier.tax_id else ""
@@ -314,6 +326,7 @@ def create_invoice_from_extraction(
         total_amount=money(extraction.total_amount),
         extraction_method=extraction.method,
         extraction_confidence=extraction.confidence,
+        is_synthetic=extraction.is_synthetic,
         raw_extraction=raw,
         source_filename=_clip(filename, 255),
         source_mime_type=_clip(mime_type, 100),
@@ -327,6 +340,7 @@ def create_invoice_from_extraction(
 
 
 def create_invoice_manual(db: Session, payload: InvoiceCreate) -> Invoice:
+    ensure_not_rectifying(payload.tax_base, payload.total_vat, payload.total_irpf, payload.total_amount)
     supplier = upsert_supplier(db, payload.supplier)
     invoice = Invoice(
         supplier=supplier,
@@ -337,6 +351,7 @@ def create_invoice_manual(db: Session, payload: InvoiceCreate) -> Invoice:
         operation_date=payload.operation_date,
         due_date=payload.due_date,
         currency=payload.currency.upper(),
+        payment_iban=payload.payment_iban,
         buyer_name=payload.buyer_name,
         buyer_tax_id=payload.buyer_tax_id,
         buyer_address=payload.buyer_address,
@@ -411,6 +426,8 @@ def apply_invoice_update(db: Session, invoice: Invoice, payload: InvoiceUpdate) 
             setattr(invoice, field, value.strip() if isinstance(value, str) else value)
     for field in MONEY_UPDATE_FIELDS & fields:
         setattr(invoice, field, money(getattr(payload, field)))
+    if fields & MONEY_UPDATE_FIELDS:
+        ensure_not_rectifying(invoice.tax_base, invoice.total_vat, invoice.total_irpf, invoice.total_amount)
 
     if "supplier_tax_id" in fields and payload.supplier_tax_id != invoice.supplier_tax_id:
         _relink_supplier(db, invoice, payload.supplier_tax_id or "")
@@ -424,6 +441,34 @@ def apply_invoice_update(db: Session, invoice: Invoice, payload: InvoiceUpdate) 
         invoice.facturae_exported_at = None
     db.flush()
     return invoice
+
+
+def related_invoice_ids(db: Session, invoice: Invoice) -> list[int]:
+    """Other invoices whose duplicate status depends on this one (same issuer + number, or same file)."""
+    return find_related_invoice_ids(
+        db,
+        supplier_id=invoice.supplier_id,
+        supplier_tax_id=invoice.supplier_tax_id,
+        series=invoice.invoice_series,
+        number=invoice.invoice_number,
+        file_hash=invoice.source_file_hash,
+        exclude_id=invoice.id,
+    )
+
+
+def reaudit_invoices(db: Session, invoice_ids: Iterable[int]) -> list[int]:
+    """Re-run the audit of the given invoices (stale DUPLICATE / VALIDATED states). Does not commit."""
+    refreshed = []
+    for invoice_id in sorted(set(invoice_ids)):
+        invoice = db.scalar(
+            select(Invoice)
+            .where(Invoice.id == invoice_id)
+            .options(joinedload(Invoice.supplier), selectinload(Invoice.lines))
+        )
+        if invoice is not None:
+            InvoiceAuditor(db).audit(invoice)
+            refreshed.append(invoice_id)
+    return refreshed
 
 
 def mark_exported(db: Session, invoice: Invoice) -> None:
@@ -597,7 +642,11 @@ def store_upload(content: bytes, file_hash: str, mime_type: str, settings: Setti
         return StoredFile(relative.as_posix(), created=False)
     temporary = target.with_name(target.name + ".part")
     temporary.write_bytes(content)
-    os.replace(temporary, target)
+    try:
+        os.replace(temporary, target)
+    except OSError:  # some virtual file systems (e.g. Pyodide's) cannot rename over an existing path
+        target.write_bytes(content)
+        temporary.unlink(missing_ok=True)
     return StoredFile(relative.as_posix(), created=True)
 
 

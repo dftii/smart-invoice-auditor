@@ -6,7 +6,7 @@
 # /api/ y /health al servicio "backend" de Compose.
 
 # --- Fase 1: compilación ---
-FROM node:24-alpine AS build
+FROM node:24.19-alpine AS build
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 
 # --- Fase 2: imagen de ejecución ---
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.28-alpine AS runtime
 
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html

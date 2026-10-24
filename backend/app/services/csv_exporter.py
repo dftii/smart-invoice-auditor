@@ -10,6 +10,8 @@ from app.models import AuditStatus, ExtractionMethod, Invoice, InvoiceLine
 
 UTF8_BOM = "﻿"
 DELIMITER = ";"
+# Largest export served in one response (the whole file is built in memory).
+MAX_EXPORT_ROWS = 50_000
 
 STATUS_LABELS = {
     AuditStatus.PENDING: "Pendiente",
@@ -102,7 +104,7 @@ def _invoice_cells(invoice: Invoice) -> list[str]:
         _text(invoice.supplier_tax_id),
         _text(invoice.buyer_name),
         _text(invoice.buyer_tax_id),
-        invoice.currency,
+        _text(invoice.currency),
         _money(invoice.tax_base),
         _money(invoice.total_vat),
         _money(invoice.total_irpf),

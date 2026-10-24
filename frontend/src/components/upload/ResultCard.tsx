@@ -1,8 +1,10 @@
 import { Bot, Copy, Cpu, Eye, PenLine, TriangleAlert } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { formatDate, formatEur, formatPercent } from '../../lib/format'
+import { invoiceLabel } from '../../lib/invoice'
 import { StatusBadge } from '../ui/StatusBadge'
 import { Button } from '../ui/Button'
+import { SyntheticChip } from '../ui/SyntheticChip'
 import type { ExtractionMethod, UploadResponse } from '../../types/api'
 
 const METHOD_CHIPS: Record<ExtractionMethod, { label: string; icon: typeof Bot; className: string }> = {
@@ -21,7 +23,7 @@ export function ResultCard({ result, onInspect }: ResultCardProps) {
   const chip = METHOD_CHIPS[method]
   const ChipIcon = chip.icon
   const confidence = invoice.extraction_confidence
-  const invoiceLabel = invoice.invoice_series ? `${invoice.invoice_series}${invoice.invoice_number}` : invoice.invoice_number
+  const label = invoiceLabel(invoice)
 
   return (
     <div className="animate-pop-in space-y-3 rounded-xl bg-white p-4 ring-1 ring-slate-900/10">
@@ -39,8 +41,8 @@ export function ResultCard({ result, onInspect }: ResultCardProps) {
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
         <div className="min-w-0">
           <dt className="text-xs text-slate-500">Factura</dt>
-          <dd className="truncate font-semibold text-slate-900" title={invoiceLabel}>
-            {invoiceLabel}
+          <dd className="truncate font-semibold text-slate-900" title={label}>
+            {label}
           </dd>
         </div>
         <div className="min-w-0">
@@ -58,6 +60,13 @@ export function ResultCard({ result, onInspect }: ResultCardProps) {
           <dd className="font-semibold tabular-nums text-slate-900">{formatEur(invoice.total_amount)}</dd>
         </div>
       </dl>
+
+      {invoice.is_synthetic && (
+        <p className="flex items-start gap-2 rounded-lg bg-amber-50 p-2.5 text-sm text-amber-900 ring-1 ring-amber-600/20">
+          <SyntheticChip />
+          <span>Contiene datos sintéticos: se puede auditar y corregir, pero la exportación a FACe está bloqueada.</span>
+        </p>
+      )}
 
       {audit.summary && <p className="text-sm text-slate-600">{audit.summary}</p>}
 

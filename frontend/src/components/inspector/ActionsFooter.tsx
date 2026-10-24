@@ -31,10 +31,13 @@ export function ActionsFooter({
   onExport,
   onDelete,
 }: ActionsFooterProps) {
-  const exportable = invoice.audit_status === 'VALIDATED'
-  const exportBlockedReason = exportable
-    ? null
-    : 'Solo se puede exportar una factura en estado «Cuadra». Corrija las discrepancias y vuelva a auditarla.'
+  const synthetic = invoice.is_synthetic === true
+  const exportable = invoice.audit_status === 'VALIDATED' && !synthetic
+  const exportBlockedReason = synthetic
+    ? 'Esta factura contiene datos sintéticos (de demostración) y no se puede exportar a FACe.'
+    : exportable
+      ? null
+      : 'Solo se puede exportar una factura en estado «Cuadra». Corrija las discrepancias y vuelva a auditarla.'
   const working = busy !== null
 
   return (

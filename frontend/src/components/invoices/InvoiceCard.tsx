@@ -4,8 +4,9 @@ import { formatDate, formatEur } from '../../lib/format'
 import { cn } from '../../lib/cn'
 import { StatusBadge } from '../ui/StatusBadge'
 import { IssueCounters } from './IssueCounters'
+import { SyntheticChip } from '../ui/SyntheticChip'
 import { OriginChip } from './OriginChip'
-import { invoiceLabel } from './invoiceDisplay'
+import { invoiceLabel } from '../../lib/invoice'
 
 interface InvoiceCardProps {
   invoice: InvoiceSummary
@@ -41,6 +42,7 @@ export function InvoiceCard({ invoice, onSelect }: InvoiceCardProps) {
           <StatusBadge status={invoice.audit_status} exportedAt={invoice.facturae_exported_at} />
           <IssueCounters errors={invoice.error_count} warnings={invoice.warning_count} />
           <OriginChip method={invoice.extraction_method} />
+          {invoice.is_synthetic && <SyntheticChip />}
           <ChevronRight aria-hidden className="ml-auto size-4 text-slate-400" />
         </div>
       </button>

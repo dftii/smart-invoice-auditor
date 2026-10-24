@@ -49,11 +49,6 @@ export interface Supplier {
   updated_at: ISODateTime
 }
 
-export interface SupplierWithStats extends Supplier {
-  invoice_count: number
-  total_invoiced: DecimalString
-}
-
 export interface InvoiceLine {
   id: number
   line_number: number
@@ -103,6 +98,8 @@ export interface InvoiceSummary {
   extraction_method: ExtractionMethod
   extraction_confidence: number | null
   source_filename: string | null
+  /** Demo/synthetic data: can be audited and edited, but the Facturae export is blocked. */
+  is_synthetic: boolean
   last_audited_at: ISODateTime | null
   facturae_exported_at: ISODateTime | null
   facturae_export_count: number
@@ -129,6 +126,8 @@ export interface InvoiceDetail {
   dir3_accounting_office: string | null
   dir3_managing_body: string | null
   dir3_processing_unit: string | null
+  /** IBAN the invoice is paid to (optional). */
+  payment_iban: string | null
   tax_base: DecimalString
   total_vat: DecimalString
   total_irpf: DecimalString
@@ -145,6 +144,8 @@ export interface InvoiceDetail {
   extraction_confidence: number | null
   source_filename: string | null
   source_mime_type: string | null
+  /** Demo/synthetic data: can be audited and edited, but the Facturae export is blocked. */
+  is_synthetic: boolean
   source_file_hash: string | null
   notes: string | null
   lines: InvoiceLine[]
@@ -243,6 +244,7 @@ export interface InvoiceUpdate {
   dir3_accounting_office?: string | null
   dir3_managing_body?: string | null
   dir3_processing_unit?: string | null
+  payment_iban?: string | null
   tax_base?: DecimalString
   total_vat?: DecimalString
   total_irpf?: DecimalString
@@ -308,11 +310,22 @@ export interface HealthResponse {
   status: 'ok'
   app: string
   version: string
+  /** Opaque description of the storage engine (e.g. "sqlite", "postgresql"); only shown, never interpreted. */
   database: string
+  /** Upload limit enforced by the backend; the UI falls back to its own constant when absent. */
+  max_upload_size_mb?: number
   extraction_mode: ExtractionMode
+}
+
+/** One FastAPI/pydantic validation error (HTTP 422). */
+export interface ValidationIssue {
+  loc: (string | number)[]
+  msg: string
+  type: string
+  ctx?: Record<string, unknown>
 }
 
 /** FastAPI error body: `detail` is a Spanish message, or a list of validation errors (422). */
 export interface ApiErrorBody {
-  detail?: string | { loc: (string | number)[]; msg: string; type: string }[]
+  detail?: string | ValidationIssue[]
 }

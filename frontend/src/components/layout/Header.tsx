@@ -1,25 +1,23 @@
 import { ExternalLink, FileCheck2, FlaskConical, Sparkles } from 'lucide-react'
 import type { ExtractionMode } from '../../types/api'
 import { cn } from '../../lib/cn'
+import type { HealthStatus } from '../../hooks/useHealth'
+import { api } from '../../services/api'
 
-export type HealthState = 'checking' | 'online' | 'offline'
-
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
-const DOCS_URL = `${BASE_URL || 'http://localhost:8000'}/docs`
-
-const HEALTH_DOT: Record<HealthState, { dot: string; label: string }> = {
+const HEALTH_DOT: Record<HealthStatus, { dot: string; label: string }> = {
   checking: { dot: 'bg-slate-300 animate-pulse', label: 'Comprobando API…' },
   online: { dot: 'bg-emerald-500', label: 'API conectada' },
   offline: { dot: 'bg-red-500', label: 'API sin conexión' },
 }
 
 interface HeaderProps {
-  health: HealthState
+  health: HealthStatus
   mode: ExtractionMode | null
 }
 
 export function Header({ health, mode }: HeaderProps) {
   const dot = HEALTH_DOT[health]
+  const docsUrl = api.docsUrl()
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/85 backdrop-blur">
       <div className="mx-auto flex max-w-[1400px] items-center gap-3 px-4 py-3 sm:px-6 lg:px-8">
@@ -71,16 +69,18 @@ export function Header({ health, mode }: HeaderProps) {
             </span>
           )}
 
-          <a
-            href={DOCS_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
-          >
-            <span className="hidden sm:inline">API docs</span>
-            <span className="sr-only sm:hidden">API docs</span>
-            <ExternalLink aria-hidden className="size-4" />
-          </a>
+          {docsUrl && (
+            <a
+              href={docsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
+            >
+              <span className="hidden sm:inline">API docs</span>
+              <span className="sr-only sm:hidden">API docs</span>
+              <ExternalLink aria-hidden className="size-4" />
+            </a>
+          )}
         </div>
       </div>
     </header>

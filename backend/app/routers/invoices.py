@@ -10,15 +10,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.config import Settings, get_settings
-from app.core.errors import InvalidInputError, NotFoundError, PayloadTooLargeError, UnsupportedMediaTypeError
-from app.db.database import get_db
+from app.core.errors import (
+    ForbiddenError,
+    InvalidInputError,
+    NotFoundError,
+    PayloadTooLargeError,
+    UnsupportedMediaTypeError,
+)
 from app.models import Invoice, ValidationLog
+from app.routers.params import DbSession, FilterParams, InvoiceIdPath, PageParam, PageSizeParam
 from app.schemas import (
     AuditReport,
     BulkRevalidateRequest,
     BulkRevalidateResponse,
     InvoiceCreate,
-    InvoiceFilters,
     InvoiceRead,
     InvoiceSummary,
     InvoiceUpdate,
@@ -28,7 +33,7 @@ from app.schemas import (
 )
 from app.services import invoice_service as service
 from app.services.auditor import InvoiceAuditor
-from app.services.csv_exporter import export_invoices_csv
+from app.services.csv_exporter import MAX_EXPORT_ROWS, export_invoices_csv
 from app.services.extractor import InvoiceExtractor, detect_mime_type, get_extractor
 from app.services.face_exporter import FacturaeExporter
 
@@ -36,14 +41,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/invoices", tags=["Facturas"])
 
-DbSession = Annotated[Session, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 ExtractorDep = Annotated[InvoiceExtractor, Depends(get_extractor)]
-FilterParams = Annotated[InvoiceFilters, Query()]
-PageParam = Annotated[int, Query(ge=1, description="Número de página (empieza en 1)")]
-PageSizeParam = Annotated[int, Query(ge=1, le=200, description="Elementos por página")]
 
 NOT_FOUND_RESPONSE = {404: {"description": "Factura no encontrada"}}
+SIGNING_REQUIRES_API_KEY = (
+    "La firma electrónica de facturas requiere proteger la API: configure API_KEY en el servidor "
+    "y envíe la cabecera X-API-Key"
+)
 
 
 def _require_invoice(db: Session, invoice_id: int) -> Invoice:
@@ -78,6 +83,7 @@ def upload_invoice(
     settings: SettingsDep,
     extractor: ExtractorDep,
 ) -> UploadResponse:
+    # The Content-Length header was already checked by UploadSizeLimitMiddleware; this guards chunked uploads.
     limit = settings.max_upload_size_bytes
     content = file.file.read(limit + 1)
     if len(content) > limit:
@@ -95,6 +101,9 @@ def upload_invoice(
     stored: service.StoredFile | None = None
     try:
         extraction = extractor.extract(content, filename, mime_type)
+        service.ensure_not_rectifying(
+            extraction.tax_base, extraction.total_vat, extraction.total_irpf, extraction.total_amount
+        )
         stored = service.store_upload(content, file_hash, mime_type, settings)
         invoice = service.create_invoice_from_extraction(
             db,
@@ -155,7 +164,10 @@ def list_invoices(
     "/export/csv",
     summary="Exportar facturas a CSV (compatible con Excel)",
     response_class=Response,
-    responses={200: {"content": {"text/csv": {}}, "description": "Archivo CSV UTF-8 con BOM y separador ';'"}},
+    responses={
+        200: {"content": {"text/csv": {}}, "description": "Archivo CSV UTF-8 con BOM y separador ';'"},
+        413: {"description": "La exportación supera el máximo de filas"},
+    },
 )
 def export_csv(
     db: DbSession,
@@ -165,7 +177,11 @@ def export_csv(
     statement = service.query_invoices(filters)
     if include_lines:
         statement = statement.options(selectinload(Invoice.lines))
-    invoices = db.scalars(statement).all()
+    invoices = db.scalars(statement.limit(MAX_EXPORT_ROWS + 1)).all()
+    rows = sum(max(len(invoice.lines), 1) for invoice in invoices) if include_lines else len(invoices)
+    if rows > MAX_EXPORT_ROWS:
+        limit_text = f"{MAX_EXPORT_ROWS:_}".replace("_", " ")
+        raise PayloadTooLargeError(f"La exportación supera el máximo de {limit_text} filas: aplique filtros para reducirla")
     body = export_invoices_csv(invoices, include_lines=include_lines)
     filename = f"facturas_{date.today():%Y%m%d}.csv"
     return Response(
@@ -200,7 +216,7 @@ def bulk_revalidate(payload: BulkRevalidateRequest, db: DbSession) -> BulkRevali
 
 
 @router.get("/{invoice_id}", response_model=InvoiceRead, summary="Detalle de una factura", responses=NOT_FOUND_RESPONSE)
-def get_invoice(invoice_id: int, db: DbSession) -> InvoiceRead:
+def get_invoice(invoice_id: InvoiceIdPath, db: DbSession) -> InvoiceRead:
     return service.read_invoice(db, invoice_id)
 
 
@@ -211,7 +227,7 @@ def get_invoice(invoice_id: int, db: DbSession) -> InvoiceRead:
     responses=NOT_FOUND_RESPONSE,
 )
 def get_invoice_logs(
-    invoice_id: int,
+    invoice_id: InvoiceIdPath,
     db: DbSession,
     all_runs: Annotated[bool, Query(description="Incluir también las auditorías anteriores")] = False,
 ) -> list[ValidationLog]:
@@ -225,11 +241,15 @@ def get_invoice_logs(
     summary="Corregir una factura y volver a auditarla",
     responses=NOT_FOUND_RESPONSE,
 )
-def update_invoice(invoice_id: int, payload: InvoiceUpdate, db: DbSession) -> InvoiceRead:
+def update_invoice(invoice_id: InvoiceIdPath, payload: InvoiceUpdate, db: DbSession) -> InvoiceRead:
     try:
         invoice = service.get_invoice(db, invoice_id)
+        # Duplicate detection depends on other invoices, so those sharing the old or the new key are re-audited.
+        stale_ids = set(service.related_invoice_ids(db, invoice))
         service.apply_invoice_update(db, invoice, payload)
+        stale_ids.update(service.related_invoice_ids(db, invoice))
         InvoiceAuditor(db).audit(invoice)
+        service.reaudit_invoices(db, stale_ids)
         db.commit()
     except Exception:
         db.rollback()
@@ -243,11 +263,15 @@ def update_invoice(invoice_id: int, payload: InvoiceUpdate, db: DbSession) -> In
     summary="Eliminar una factura y su archivo original",
     responses=NOT_FOUND_RESPONSE,
 )
-def delete_invoice(invoice_id: int, db: DbSession, settings: SettingsDep) -> Response:
+def delete_invoice(invoice_id: InvoiceIdPath, db: DbSession, settings: SettingsDep) -> Response:
     invoice = _require_invoice(db, invoice_id)
     stored_path = invoice.source_file_path
     try:
+        stale_ids = service.related_invoice_ids(db, invoice)
         db.delete(invoice)
+        db.flush()
+        # Invoices that were flagged as duplicates of this one may no longer be.
+        service.reaudit_invoices(db, stale_ids)
         db.commit()
     except Exception:
         db.rollback()
@@ -263,7 +287,7 @@ def delete_invoice(invoice_id: int, db: DbSession, settings: SettingsDep) -> Res
     summary="Volver a ejecutar la auditoría de una factura",
     responses=NOT_FOUND_RESPONSE,
 )
-def revalidate_invoice(invoice_id: int, db: DbSession) -> AuditReport:
+def revalidate_invoice(invoice_id: InvoiceIdPath, db: DbSession) -> AuditReport:
     try:
         invoice = service.get_invoice(db, invoice_id)
         report = InvoiceAuditor(db).audit(invoice)
@@ -280,19 +304,28 @@ def revalidate_invoice(invoice_id: int, db: DbSession) -> AuditReport:
     response_class=Response,
     responses={
         200: {"content": {"application/xml": {}}, "description": "XML Facturae"},
+        403: {"description": "La firma requiere API_KEY configurada en el servidor"},
         404: {"description": "Factura no encontrada"},
         409: {"description": "La factura no está en estado VALIDATED"},
     },
 )
 def download_facturae(
-    invoice_id: int,
+    invoice_id: InvoiceIdPath,
     db: DbSession,
     settings: SettingsDep,
-    sign: Annotated[bool | None, Query(description="Firmar con XAdES; por defecto, solo si hay certificado")] = None,
+    sign: Annotated[
+        bool | None,
+        Query(description="Firmar con XAdES; por defecto, solo si hay certificado y la API está protegida con API_KEY"),
+    ] = None,
 ) -> Response:
+    protected = settings.api_key is not None  # the router dependency already checked the X-API-Key header
+    if sign is True and not protected:
+        raise ForbiddenError(SIGNING_REQUIRES_API_KEY)
+    # Without an API key anyone could sign with the server certificate, so the default becomes "unsigned".
+    effective_sign = sign if sign is not None else (settings.facturae_cert_path is not None and protected)
     invoice = service.get_invoice(db, invoice_id)
     exporter = FacturaeExporter(settings)
-    xml = exporter.to_xml(invoice, sign=sign)
+    xml = exporter.to_xml(invoice, sign=effective_sign)
     service.mark_exported(db, invoice)
     return Response(content=xml, media_type="application/xml", headers=_attachment(exporter.filename_for(invoice)))
 
@@ -303,7 +336,7 @@ def download_facturae(
     response_class=FileResponse,
     responses=NOT_FOUND_RESPONSE,
 )
-def download_original_file(invoice_id: int, db: DbSession, settings: SettingsDep) -> FileResponse:
+def download_original_file(invoice_id: InvoiceIdPath, db: DbSession, settings: SettingsDep) -> FileResponse:
     invoice = _require_invoice(db, invoice_id)
     path = service.resolve_stored_path(invoice.source_file_path, settings)
     if path is None:
