@@ -71,6 +71,7 @@ export const RULE_LABELS: Record<RuleCode, string> = {
   CURRENCY: 'Moneda',
   FACE_DIR3: 'Códigos DIR3 (FACe)',
   FACE_PARTY_DATA: 'Datos de las partes (Facturae)',
+  SYNTHETIC_DATA: 'Datos sintéticos (Modo Demo)',
 }
 
 export function ruleLabel(code: string): string {

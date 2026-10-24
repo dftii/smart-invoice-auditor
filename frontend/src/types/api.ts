@@ -30,6 +30,7 @@ export type RuleCode =
   | 'CURRENCY'
   | 'FACE_DIR3'
   | 'FACE_PARTY_DATA'
+  | 'SYNTHETIC_DATA'
 
 export interface Supplier {
   id: number
