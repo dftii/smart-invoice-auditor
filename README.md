@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Tailwind%20CSS-v4-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS v4" />
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker" />
   <img src="https://img.shields.io/badge/Facturae-3.2.2-1E3A8A" alt="Facturae 3.2.2" />
-  <img src="https://img.shields.io/badge/tests-1264%20backend%20%C2%B7%2080%20frontend-brightgreen" alt="tests: 1264 backend, 80 frontend" />
+  <img src="https://img.shields.io/badge/tests-1264%20backend%20%C2%B7%2091%20frontend-brightgreen" alt="tests: 1264 backend, 91 frontend" />
   <a href="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml"><img src="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License MIT" />
 </p>
@@ -47,7 +47,9 @@ GitHub Pages solo sirve archivos estáticos, así que la demo no llama a ningún
 
 - La primera carga descarga unos 14 MB y tarda unos 10 s; las siguientes, unos 5 s gracias a la caché.
 - Los datos viven en memoria y se reinician al recargar la página.
-- En la demo no hay Modo IA ni firma XAdES (no hay claves ni certificados en el navegador).
+- Por defecto la demo extrae los datos con el parser de texto local (Modo Demo), sin IA.
+- **Modo IA con tu propia clave.** Con el botón «Usar mi API key» puedes pegar una API key de Anthropic y Claude leerá las facturas, también imágenes y escaneos. Se usa la misma `ClaudeVisionStrategy` del backend (prompt, herramienta `record_invoice` y normalización), con un cliente que llama a `api.anthropic.com` desde el Web Worker. La clave se guarda solo en tu navegador (en `sessionStorage`, o en `localStorage` si marcas «Recordar»), se envía únicamente a Anthropic y se comprueba con una petición vacía que no consume tokens. Cada factura sí consume tokens de tu cuenta.
+- No hay firma XAdES (no hay certificados en el navegador).
 
 El build de la demo (`npm run build:demo` en `frontend/`) empaqueta `backend/app` y las ruedas Python puras en `public/demo/`, y el workflow `.github/workflows/pages.yml` lo publica en cada push a `main`.
 
@@ -461,7 +463,7 @@ Para parar los servicios, usa `docker compose --profile mysql down`. Añade `-v`
 
 ## Tests y cobertura
 
-El backend tiene **1264 tests** y una cobertura de alrededor del **96 %**; el frontend, **80 tests** con vitest (`npm run test` en `frontend/`). Desde el directorio `backend/`:
+El backend tiene **1264 tests** y una cobertura de alrededor del **96 %**; el frontend, **91 tests** con vitest (`npm run test` en `frontend/`). Desde el directorio `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -596,7 +598,7 @@ Distribuido bajo la licencia MIT. Consulta el fichero [LICENSE](LICENSE) para m�
 - **Facturae 3.2.2 export** with optional XAdES signature (PKCS#12 certificate), and CSV export for Excel.
 - **Web dashboard** built with React 19, TypeScript and Tailwind CSS v4: KPI cards, drag-and-drop upload with a live audit reveal, a filterable invoice table with status badges, and an inspector to reconcile, correct, re-audit and export each invoice.
 
-**Live demo:** https://dftii.github.io/smart-invoice-auditor/ runs the real FastAPI backend inside the browser with Pyodide (WebAssembly), with an in-memory SQLite database. It starts empty: you only see the invoices you upload. No server involved.
+**Live demo:** https://dftii.github.io/smart-invoice-auditor/ runs the real FastAPI backend inside the browser with Pyodide (WebAssembly), with an in-memory SQLite database. It starts empty: you only see the invoices you upload. No server involved. Extraction uses the local text parser by default; paste your own Anthropic API key ("Usar mi API key") to extract with Claude. The key stays in your browser and is only sent to api.anthropic.com.
 
 **Quick start with Docker:**
 
@@ -609,7 +611,7 @@ Optionally, `docker compose --profile seed run --rm seed` loads 25 sample invoic
 
 Then open http://localhost:8080 for the web interface and http://localhost:8000/docs for the API.
 
-**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1264 tests (about 96 percent coverage) and the frontend 80 vitest tests; GitHub Actions runs them on every push.
+**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1264 tests (about 96 percent coverage) and the frontend 91 vitest tests; GitHub Actions runs them on every push.
 
 **Roadmap.** OCR for scanned PDFs, submission of signed invoices to the FACe web service, users and roles, and Alembic migrations.
 

@@ -11,6 +11,11 @@ import type { StatusPreset } from './components/invoices/filters'
 import { UploadZone } from './components/upload/UploadZone'
 import { useHealth } from './hooks/useHealth'
 import { DEFAULT_MAX_UPLOAD_MB } from './lib/config'
+import { useAiKey } from './demo/aiKey'
+
+const IS_DEMO = import.meta.env.VITE_DEMO === '1'
+// In-browser demo only (build-time constant: normal builds drop it): use Claude with the visitor's own API key.
+const AiKeyPanel = IS_DEMO ? lazy(() => import('./demo/AiKeyPanel')) : null
 
 // The inspector is only needed once an invoice is opened.
 const AuditInspector = lazy(() =>
@@ -32,7 +37,9 @@ function Dashboard() {
     document.getElementById('facturas')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
 
-  const mode = health.data?.extraction_mode ?? stats.data?.extraction_mode ?? null
+  const demoAiKey = useAiKey()
+  // The demo backend always reports DEMO; with the visitor's key its uploads go through Claude.
+  const mode = IS_DEMO && demoAiKey ? 'AI' : (health.data?.extraction_mode ?? stats.data?.extraction_mode ?? null)
   const offline = health.status === 'offline'
   // Before the first successful check there is nothing to show; afterwards an outage only adds a banner.
   const blocked = offline && !health.everOnline
@@ -61,6 +68,11 @@ function Dashboard() {
                   Extracción automática de los datos y auditoría fiscal al instante.
                 </p>
               </div>
+              {AiKeyPanel && (
+                <Suspense fallback={null}>
+                  <AiKeyPanel />
+                </Suspense>
+              )}
               <UploadZone
                 extractionMode={mode}
                 maxUploadMb={health.data?.max_upload_size_mb ?? DEFAULT_MAX_UPLOAD_MB}

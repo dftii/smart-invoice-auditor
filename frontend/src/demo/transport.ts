@@ -1,6 +1,7 @@
 // Transport that sends every API request to the in-browser backend (Pyodide in a Web Worker) instead of HTTP.
 
 import { buildQuery, type JsonValue, type Transport, type TransportRequest, type TransportResponse } from '../services/api'
+import { getAiKey } from './aiKey'
 import type { BootProgress, WorkerOutbound, WorkerRequest, WorkerResponse } from './protocol'
 
 export type { BootProgress } from './protocol'
@@ -165,12 +166,18 @@ export const demoTransport: Transport = async (request) => {
   const active = session
   if (!active) throw new Error(BACKEND_UNAVAILABLE)
   const id = active.nextId++
+  // Only uploads extract data, so only they carry the visitor's key (runtime.py: AI_KEY_HEADER).
+  const aiKey = request.path.endsWith('/invoices/upload') ? getAiKey() : null
   const message: WorkerRequest = {
     id,
     method: request.method,
     path: request.path,
     query: buildQuery(request.query).replace(/^\?/, ''),
-    headers: { accept: 'application/json, */*', ...(contentType ? { 'content-type': contentType } : {}) },
+    headers: {
+      accept: 'application/json, */*',
+      ...(contentType ? { 'content-type': contentType } : {}),
+      ...(aiKey ? { 'x-demo-anthropic-key': aiKey } : {}),
+    },
     body: bytes,
   }
   const finishProgress =

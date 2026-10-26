@@ -6,6 +6,9 @@ Shipped inside backend.zip (next to app/) and extracted to /app by src/demo/work
     await runtime.boot_js()      // shims + import app.main + ASGI lifespan startup (init_db)
     const r = await runtime.handle_js(method, path, query, headers, bodyUint8Array)
 
+Extraction runs in Modo Demo (text parser) unless an upload carries the visitor's own Anthropic key in the
+``x-demo-anthropic-key`` header: then it uses the backend's ClaudeVisionStrategy with BrowserAnthropicClient.
+
 Public coroutine API:
     handle(method, path, query, headers, body_bytes) -> (status:int, headers:list[tuple[str,str]], body:bytes)
     handle_js(...)  same, but takes/returns JS-friendly values (JsProxy in, {status, headers, body:Uint8Array} out)
@@ -17,6 +20,8 @@ import os
 import sys
 import types
 from urllib.parse import quote
+
+from starlette.requests import Request  # module level: FastAPI resolves demo_extractor's annotation from these globals
 
 APP_ROOT = "/app"  # directory that contains the `app` package
 
@@ -37,19 +42,61 @@ def configure_env() -> None:
 
 
 def stub_missing_modules() -> list[str]:
-    """Stub packages that are not installed in the browser (only needed while the backend imports them eagerly)."""
-    stubbed = []
-    for name in ("anthropic",):
-        try:
-            __import__(name)
-        except ImportError:
-            m = types.ModuleType(name)
-            # `except anthropic.BadRequestError` is only evaluated on the AI path, which is disabled; give every
-            # attribute a harmless exception class so even a stray lookup cannot crash with AttributeError.
-            m.__getattr__ = lambda attr, _n=name: type(attr, (Exception,), {})  # type: ignore[attr-defined]
-            sys.modules[name] = m
-            stubbed.append(name)
-    return stubbed
+    """The Anthropic SDK is not installed in the browser: register a stand-in ``anthropic`` module.
+
+    ClaudeVisionStrategy only uses the SDK for its exception classes (``except anthropic.AuthenticationError`` ...) and
+    for the client, which the demo replaces with BrowserAnthropicClient. The stand-in defines the same exception
+    hierarchy as the SDK (APITimeoutError < APIConnectionError < APIError, the 4xx classes < APIStatusError), so the
+    strategy's error handling and Spanish messages work unchanged.
+    """
+    try:
+        __import__("anthropic")
+        return []
+    except ImportError:
+        pass
+
+    class APIError(Exception):
+        def __init__(self, message: str, status_code: int | None = None) -> None:
+            super().__init__(message)
+            self.message = message
+            self.status_code = status_code
+
+    class APIConnectionError(APIError):
+        pass
+
+    class APITimeoutError(APIConnectionError):
+        pass
+
+    class APIStatusError(APIError):
+        pass
+
+    class BadRequestError(APIStatusError):
+        pass
+
+    class AuthenticationError(APIStatusError):
+        pass
+
+    class PermissionDeniedError(APIStatusError):
+        pass
+
+    class RateLimitError(APIStatusError):
+        pass
+
+    module = types.ModuleType("anthropic")
+    for cls in (
+        APIError,
+        APIConnectionError,
+        APITimeoutError,
+        APIStatusError,
+        BadRequestError,
+        AuthenticationError,
+        PermissionDeniedError,
+        RateLimitError,
+    ):
+        cls.__module__ = "anthropic"
+        setattr(module, cls.__name__, cls)
+    sys.modules["anthropic"] = module
+    return ["anthropic"]
 
 
 def patch_threadpool() -> None:
@@ -65,6 +112,117 @@ def patch_threadpool() -> None:
         return func(*args)
 
     anyio.to_thread.run_sync = run_sync
+
+
+# --------------------------------------------------------------------------- AI with the visitor's own API key
+
+# The demo never ships an API key. A visitor may paste their own Anthropic key in the UI; the demo transport then sends
+# it with each upload in this header, and only for that request the extractor uses ClaudeVisionStrategy (the same
+# prompt, tool schema and normalization as the server) with a client that calls the Anthropic API from the browser.
+AI_KEY_HEADER = "x-demo-anthropic-key"
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _api_error_message(text: str, status: int) -> str:
+    import json
+
+    try:
+        error = json.loads(text).get("error") or {}
+        message = str(error.get("message") or "").strip()
+    except (ValueError, AttributeError):
+        message = ""
+    return message or f"HTTP {status}"
+
+
+def _status_error_class(status: int) -> type:
+    import anthropic
+
+    return {
+        400: anthropic.BadRequestError,
+        401: anthropic.AuthenticationError,
+        403: anthropic.PermissionDeniedError,
+        429: anthropic.RateLimitError,
+    }.get(status, anthropic.APIStatusError)
+
+
+class _Messages:
+    def __init__(self, client: BrowserAnthropicClient) -> None:
+        self._client = client
+
+    def create(self, **params):
+        return self._client.post_message(params)
+
+
+class BrowserAnthropicClient:
+    """Synchronous stand-in for ``anthropic.Anthropic`` (only ``messages.create``) that runs in the Web Worker.
+
+    The backend extraction code is synchronous, so the request uses a synchronous XMLHttpRequest, which browsers allow
+    inside workers. The response is returned as attribute objects (``response.content[i].type``, ``.name``,
+    ``.input``, ``response.stop_reason``), the shape ClaudeVisionStrategy reads from the SDK.
+    """
+
+    def __init__(self, api_key: str, timeout_seconds: float) -> None:
+        self._api_key = api_key
+        self._timeout_seconds = timeout_seconds
+        self.messages = _Messages(self)
+
+    def post_message(self, params: dict):
+        import json
+        import time
+
+        import anthropic
+        from js import XMLHttpRequest
+        from pyodide.ffi import JsException
+
+        xhr = XMLHttpRequest.new()
+        xhr.open("POST", ANTHROPIC_MESSAGES_URL, False)
+        xhr.timeout = int(self._timeout_seconds * 1000)
+        xhr.setRequestHeader("content-type", "application/json")
+        xhr.setRequestHeader("x-api-key", self._api_key)
+        xhr.setRequestHeader("anthropic-version", ANTHROPIC_VERSION)
+        # Required by the API for calls made from a browser; the key is the visitor's own and never leaves their tab
+        # except towards api.anthropic.com.
+        xhr.setRequestHeader("anthropic-dangerous-direct-browser-access", "true")
+        started = time.monotonic()
+        try:
+            xhr.send(json.dumps(params))
+        except JsException as exc:
+            if time.monotonic() - started >= self._timeout_seconds * 0.95:
+                raise anthropic.APITimeoutError("Request timed out") from exc
+            raise anthropic.APIConnectionError("Connection error") from exc
+
+        status = int(xhr.status)
+        text = str(xhr.responseText or "")
+        if status == 0:  # CORS rejection, offline, blocked by an extension...
+            raise anthropic.APIConnectionError("Connection error")
+        if status >= 400:
+            raise _status_error_class(status)(_api_error_message(text, status), status)
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise anthropic.APIError("Invalid JSON in the API response") from exc
+        blocks = [types.SimpleNamespace(**block) for block in data.get("content") or [] if isinstance(block, dict)]
+        return types.SimpleNamespace(content=blocks, stop_reason=data.get("stop_reason"), model=data.get("model"))
+
+
+def demo_extractor(request: Request):
+    """Replaces the ``get_extractor`` dependency: Claude with the visitor's key when the header is present."""
+    from app.core.config import get_settings
+    from app.services.extraction import ClaudeVisionStrategy, InvoiceExtractor
+
+    settings = get_settings()
+    api_key = (request.headers.get(AI_KEY_HEADER) or "").strip()
+    if not api_key:
+        return InvoiceExtractor(settings)
+    client = BrowserAnthropicClient(api_key, settings.ai_timeout_seconds)
+    return InvoiceExtractor(settings, ClaudeVisionStrategy(settings, client=client))
+
+
+def install_ai_override(app) -> None:
+    from app.services.extraction import get_extractor
+
+    app.dependency_overrides[get_extractor] = demo_extractor
 
 
 # --------------------------------------------------------------------------- ASGI driver
@@ -155,6 +313,7 @@ async def boot() -> dict:
     import app.main  # noqa: PLC0415
 
     _state["app"] = app.main.app
+    install_ai_override(app.main.app)
     await _lifespan_start(app.main.app)
     _state["booted"] = True
     return info
