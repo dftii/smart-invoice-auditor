@@ -160,9 +160,11 @@ class FakeExtractor:
         self.result = make_extraction()
         self.error: Exception | None = None
         self.calls = 0
+        self.ocr_texts: list[str | None] = []
 
-    def extract(self, content: bytes, filename: str, mime_type: str) -> ExtractionResult:
+    def extract(self, content: bytes, filename: str, mime_type: str, ocr_text: str | None = None) -> ExtractionResult:
         self.calls += 1
+        self.ocr_texts.append(ocr_text)
         if self.error is not None:
             raise self.error
         return self.result.model_copy(deep=True)

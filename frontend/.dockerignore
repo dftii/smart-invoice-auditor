@@ -20,3 +20,7 @@ dist-ssr
 Dockerfile
 .dockerignore
 README.md
+
+# Recursos generados en la build (OCR y demo en el navegador): se regeneran dentro de la imagen
+public/ocr
+public/demo

@@ -7,6 +7,8 @@ from app.schemas import ExtractionResult
 
 MAX_PDF_PAGES = 10
 MAX_RAW_TEXT_CHARS = 20_000
+# Text recognised by OCR in the user's browser (images, scanned PDFs): about 6,000 characters per page, 10 pages.
+MAX_OCR_TEXT_CHARS = 60_000
 
 PDF_MIME = "application/pdf"
 IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp")
@@ -51,6 +53,8 @@ def detect_mime_type(content: bytes, filename: str) -> str:
 class ExtractionStrategy(ABC):
     name: str
     method: ExtractionMethod
+    # Strategies that set this receive ``ocr_text=`` (text recognised in the browser) as a keyword argument.
+    accepts_ocr_text: bool = False
 
     @abstractmethod
     def extract(self, content: bytes, filename: str, mime_type: str) -> ExtractionResult:

@@ -4,7 +4,7 @@ import logging
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -34,6 +34,7 @@ from app.schemas import (
 from app.services import invoice_service as service
 from app.services.auditor import InvoiceAuditor
 from app.services.csv_exporter import MAX_EXPORT_ROWS, export_invoices_csv
+from app.services.extraction.base import MAX_OCR_TEXT_CHARS
 from app.services.extractor import InvoiceExtractor, detect_mime_type, get_extractor
 from app.services.face_exporter import FacturaeExporter
 
@@ -82,6 +83,14 @@ def upload_invoice(
     db: DbSession,
     settings: SettingsDep,
     extractor: ExtractorDep,
+    ocr_text: Annotated[
+        str | None,
+        Form(
+            max_length=MAX_OCR_TEXT_CHARS,
+            description="Texto reconocido por OCR en el cliente (imágenes y PDF escaneados). Opcional: el Modo Demo "
+            "lo usa cuando el documento no tiene texto propio; el Modo IA lee el documento directamente.",
+        ),
+    ] = None,
 ) -> UploadResponse:
     # The Content-Length header was already checked by UploadSizeLimitMiddleware; this guards chunked uploads.
     limit = settings.max_upload_size_bytes
@@ -100,7 +109,7 @@ def upload_invoice(
     file_hash = service.sha256_hex(content)
     stored: service.StoredFile | None = None
     try:
-        extraction = extractor.extract(content, filename, mime_type)
+        extraction = extractor.extract(content, filename, mime_type, ocr_text=ocr_text)
         service.ensure_not_rectifying(
             extraction.tax_base, extraction.total_vat, extraction.total_irpf, extraction.total_amount
         )

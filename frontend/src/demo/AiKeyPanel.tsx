@@ -19,9 +19,9 @@ export default function AiKeyPanel() {
         <Sparkles className="size-5" />
       </span>
       <p className="min-w-0 flex-1 text-sm text-slate-600">
-        La demo lee las facturas sin IA, con un parser de texto para PDF.{' '}
+        La demo lee las facturas gratis y sin IA: un parser de texto y, para fotos y escaneos, OCR en tu navegador.{' '}
         <span className="text-slate-900">¿Tienes una API key de Anthropic?</span> Úsala para que Claude extraiga los
-        datos, también de imágenes y escaneos.
+        datos de facturas con cualquier formato.
       </p>
       <Button variant="secondary" icon={<KeyRound aria-hidden className="size-4" />} onClick={() => setEditing(true)}>
         Usar mi API key

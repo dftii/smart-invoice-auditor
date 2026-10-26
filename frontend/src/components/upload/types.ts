@@ -5,6 +5,8 @@ export type ProcessingStep = 'scanning' | 'extracting' | 'auditing'
 /** Every state a queued file can be in; `kind` is the discriminant. */
 export type UploadPhase =
   | { kind: 'queued' }
+  /** OCR in the browser (images and scanned PDFs, Modo Demo only), before the upload. `progress` goes from 0 to 1. */
+  | { kind: 'reading'; stage: string; progress: number }
   | { kind: 'uploading'; loaded: number; total: number }
   /** Server is extracting + auditing. `result` is set once the response arrived but the minimum scan animation is still playing. */
   | { kind: 'processing'; step: ProcessingStep; result: UploadResponse | null }
@@ -36,6 +38,8 @@ export function activeStepIndex(phase: UploadPhase): number {
       return -1
     case 'uploading':
       return 0
+    case 'reading':
+      return 1
     case 'processing':
       return PROCESSING_INDEX[phase.step]
     case 'revealing':

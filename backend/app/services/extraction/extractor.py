@@ -9,7 +9,13 @@ from app.core.config import Settings, get_settings
 from app.models import ExtractionMethod
 from app.schemas import ExtractionResult
 from app.services.extraction.ai_strategy import ClaudeVisionStrategy
-from app.services.extraction.base import ExtractionError, ExtractionStrategy, InvalidDocumentError, detect_mime_type
+from app.services.extraction.base import (
+    MAX_OCR_TEXT_CHARS,
+    ExtractionError,
+    ExtractionStrategy,
+    InvalidDocumentError,
+    detect_mime_type,
+)
 from app.services.extraction.demo import DemoParserStrategy
 
 logger = logging.getLogger(__name__)
@@ -29,10 +35,14 @@ class InvoiceExtractor:
     def mode(self) -> Literal["AI", "DEMO"]:
         return "AI" if self._strategy.method == ExtractionMethod.AI else "DEMO"
 
-    def extract(self, content: bytes, filename: str, mime_type: str) -> ExtractionResult:
+    def extract(
+        self, content: bytes, filename: str, mime_type: str, ocr_text: str | None = None
+    ) -> ExtractionResult:
+        """``ocr_text``: text the client recognised with OCR (images, scanned PDFs); only text-based strategies use it."""
         effective_mime = self._validate(content, filename, mime_type)
+        ocr_text = (ocr_text or "").strip()[:MAX_OCR_TEXT_CHARS] or None
         try:
-            result = self._strategy.extract(content, filename, effective_mime)
+            result = self._run(self._strategy, content, filename, effective_mime, ocr_text)
         except Exception as exc:
             if self._strategy.method != ExtractionMethod.AI or not self._settings.ai_fallback_to_demo:
                 if isinstance(exc, ExtractionError):
@@ -40,10 +50,18 @@ class InvoiceExtractor:
                 logger.exception("Unexpected extraction failure")
                 raise ExtractionError("Error inesperado durante la extracción") from exc
             logger.warning("AI extraction failed, falling back to demo mode: %s", exc)
-            result = DemoParserStrategy().extract(content, filename, effective_mime)
+            result = self._run(DemoParserStrategy(), content, filename, effective_mime, ocr_text)
             result.warnings.insert(0, "La extracción con IA falló; se ha usado el modo demo como alternativa.")
         validate_result(result)
         return result
+
+    @staticmethod
+    def _run(
+        strategy: ExtractionStrategy, content: bytes, filename: str, mime_type: str, ocr_text: str | None
+    ) -> ExtractionResult:
+        if ocr_text and getattr(strategy, "accepts_ocr_text", False):
+            return strategy.extract(content, filename, mime_type, ocr_text=ocr_text)  # type: ignore[call-arg]
+        return strategy.extract(content, filename, mime_type)
 
     def _validate(self, content: bytes, filename: str, mime_type: str) -> str:
         if not content:

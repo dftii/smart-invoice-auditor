@@ -519,14 +519,19 @@ async function download(path: string, query: QueryParams | undefined, fallbackNa
   return filename
 }
 
-/** Uploads one invoice file; the HTTP transport reports real upload progress. */
+/**
+ * Uploads one invoice file; the HTTP transport reports real upload progress. `ocrText`: text recognised in the
+ * browser for images and scanned PDFs, which the backend's demo parser reads when the file has no text of its own.
+ */
 export async function uploadInvoice(
   file: File,
   onProgress?: (progress: UploadProgress) => void,
   signal?: AbortSignal,
+  ocrText?: string | null,
 ): Promise<UploadResponse> {
   const form = new FormData()
   form.append('file', file)
+  if (ocrText) form.append('ocr_text', ocrText)
   return requestJson<UploadResponse>({
     method: 'POST',
     path: `${API_PREFIX}/invoices/upload`,

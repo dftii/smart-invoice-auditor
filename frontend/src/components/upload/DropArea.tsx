@@ -5,7 +5,7 @@ import { ACCEPT_ATTRIBUTE } from './validation'
 
 const MODE_TEXT = {
   AI: 'Modo IA: extracción con Claude',
-  DEMO: 'Modo Demo: parser inteligente sin coste',
+  DEMO: 'Modo Demo: parser de texto y OCR, sin coste',
 } as const
 
 interface DropAreaProps {

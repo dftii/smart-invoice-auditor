@@ -86,10 +86,25 @@ _DIR3_LABELS = {
     "dir3_processing_unit": r"unidad\s+tramitadora",
 }
 _CONFIDENCE_CAP = 0.95
+# "Concepto x3 256,50 €": quantity written as a multiplier followed by the line amount (no table header).
+_MULTIPLIER_ROW_RE = re.compile(
+    r"^(?P<concept>.*?[A-Za-z]{2}.*?)\s+[x×]\s?(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<amount>\d+(?:[.,]\d+)*)\s*(?:€|EUR)?$",
+    re.IGNORECASE,
+)
+# OCR misreads of "nº" right after "Factura" ("n*%", "n°", "n.", "nº."), and of "Nº" before "factura".
+_OCR_NUMBER_LABEL_RE = re.compile(r"(?i)\b(factura|invoice)\s+n\s?[^\w\s]{1,3}\s*:")
+_OCR_LEADING_NUMBER_LABEL_RE = re.compile(r"(?im)^n\s?[^\w\s]{1,3}\s*(?=(?:de\s+)?factura\b)")
 
 
+def normalize_ocr_text(text: str) -> str:
+    """Undo the OCR artefacts that break the parser; text extracted from a PDF never needs this.
 
-
+    Table rules read as "|" become column gaps, and the "nº" label, which Tesseract often reads as "n*%" or "n°",
+    is restored so the invoice number is found.
+    """
+    text = text.replace("|", "  ")
+    text = _OCR_NUMBER_LABEL_RE.sub(lambda match: f"{match.group(1)} nº:", text)
+    return _OCR_LEADING_NUMBER_LABEL_RE.sub("Nº ", text)
 
 
 def _line_amounts(text: str) -> list[Decimal]:
@@ -339,6 +354,15 @@ class SpanishInvoiceTextParser:
                 return cleaned
         return None
 
+    @staticmethod
+    def _name_before_tax_id(row: str, fold_row: str) -> str | None:
+        """"Desarrollos Web, S.L. (CIF B46271896)" -> "Desarrollos Web, S.L."; None when nothing precedes the ID."""
+        match = _LABELLED_TAX_ID_RE.search(fold_row)
+        if match is None:
+            return None
+        head = row[: match.start()].rstrip(" ,;:-(–")
+        return head if re.search(r"[A-Za-zÀ-ÿ]{3}", head) and not _LABEL_LINE_RE.match(fold(head)) else None
+
     def _party_from_block(self, rows: list[str]) -> ExtractedParty:
         rows = [row for row in rows if row.strip()]
         tax_id = None
@@ -371,9 +395,8 @@ class SpanishInvoiceTextParser:
                 and re.search(r"[A-Za-z]{3}", row)
                 and not _EMAIL_RE.search(row)
                 and not _POSTAL_RE.match(row)
-                and not self._tax_id_in(fold_row)
             ):
-                name = row.strip()
+                name = row.strip() if not self._tax_id_in(fold_row) else self._name_before_tax_id(row, fold_row)
 
         for row in rows:
             match = _POSTAL_RE.search(row)
@@ -475,6 +498,30 @@ class SpanishInvoiceTextParser:
                 continue
             if strict and ":" in row:
                 continue
+            multiplier = _MULTIPLIER_ROW_RE.match(re.sub(r"\s+", " ", row.strip()))
+            if multiplier:
+                try:
+                    quantity = parse_decimal(multiplier.group("qty"))
+                    amount = parse_decimal(multiplier.group("amount"))
+                except InvalidOperation:
+                    quantity = Decimal(0)
+                if quantity > 0:
+                    vat_rate = default_vat if default_vat is not None else Decimal(21)
+                    assumed_vat = assumed_vat or default_vat is None
+                    irpf_rate = totals.irpf_rate or Decimal(0)
+                    result.append(
+                        ExtractedLine(
+                            concept=multiplier.group("concept").strip(),
+                            quantity=quantity,
+                            unit_price=(amount / quantity).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP),
+                            vat_rate=vat_rate,
+                            irpf_rate=irpf_rate,
+                            line_base=round_money(amount),
+                            vat_amount=percent_of(amount, vat_rate),
+                            irpf_amount=percent_of(amount, irpf_rate),
+                        )
+                    )
+                    continue
             split = self._split_row(row, len(columns))
             if split is None:
                 if result and (row[:1].islower() or row[:1] == "(") and not _LABEL_LINE_RE.match(folded_row):

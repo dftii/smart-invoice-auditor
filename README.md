@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Tailwind%20CSS-v4-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS v4" />
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker" />
   <img src="https://img.shields.io/badge/Facturae-3.2.2-1E3A8A" alt="Facturae 3.2.2" />
-  <img src="https://img.shields.io/badge/tests-1264%20backend%20%C2%B7%2091%20frontend-brightgreen" alt="tests: 1264 backend, 91 frontend" />
+  <img src="https://img.shields.io/badge/tests-1286%20backend%20%C2%B7%20104%20frontend-brightgreen" alt="tests: 1286 backend, 104 frontend" />
   <a href="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml"><img src="https://github.com/dftii/smart-invoice-auditor/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License MIT" />
 </p>
@@ -47,7 +47,7 @@ GitHub Pages solo sirve archivos estáticos, así que la demo no llama a ningún
 
 - La primera carga descarga unos 14 MB y tarda unos 10 s; las siguientes, unos 5 s gracias a la caché.
 - Los datos viven en memoria y se reinician al recargar la página.
-- Por defecto la demo extrae los datos con el parser de texto local (Modo Demo), sin IA.
+- Por defecto la demo extrae los datos sin IA y gratis (Modo Demo): un parser de texto para los PDF y, para fotos y escaneos, OCR con Tesseract en tu navegador.
 - **Modo IA con tu propia clave.** Con el botón «Usar mi API key» puedes pegar una API key de Anthropic y Claude leerá las facturas, también imágenes y escaneos. Se usa la misma `ClaudeVisionStrategy` del backend (prompt, herramienta `record_invoice` y normalización), con un cliente que llama a `api.anthropic.com` desde el Web Worker. La clave se guarda solo en tu navegador (en `sessionStorage`, o en `localStorage` si marcas «Recordar»), se envía únicamente a Anthropic y se comprueba con una petición vacía que no consume tokens. Cada factura sí consume tokens de tu cuenta.
 - No hay firma XAdES (no hay certificados en el navegador).
 
@@ -65,7 +65,7 @@ En muchas pymes y departamentos de contabilidad, cada factura recibida se teclea
 
 SmartInvoice-FACe Auditor convierte una factura en PDF o imagen en datos auditados en segundos:
 
-- **Extracción.** Con Claude Vision (Modo IA) o con un parser local que no hace llamadas externas (Modo Demo).
+- **Extracción.** Con Claude Vision (Modo IA) o con un parser local que no hace llamadas externas (Modo Demo). En el Modo Demo, las fotos y los PDF escaneados se leen antes con OCR gratuito en el navegador.
 - **Auditoría.** 18 reglas fiscales que comparan cada importe al céntimo, con un registro de cada comprobación, también de las superadas.
 - **Exportación.** XML Facturae 3.2.2 con firma XAdES opcional, y CSV preparado para abrirse en Excel.
 - **Panel.** Indicadores, tabla filtrable e inspector para revisar, corregir, volver a auditar y exportar cada factura.
@@ -86,7 +86,7 @@ flowchart TB
         R["Routers<br/>invoices, suppliers, stats"]
         EX{"InvoiceExtractor<br/>strategy"}
         CL["ClaudeVisionStrategy<br/>si hay ANTHROPIC_API_KEY"]
-        DM["DemoParserStrategy<br/>pypdf y regex, o factura sintética"]
+        DM["DemoParserStrategy<br/>pypdf o texto OCR del navegador, y regex"]
         SVC["invoice_service<br/>upsert de proveedor y persistencia"]
         AUD["InvoiceAuditor<br/>NIF/NIE/CIF, líneas, IVA 21/10/4,<br/>IRPF, totales, duplicados, DIR3, datos de partes"]
         LOG["ValidationLog<br/>traza por regla y por ejecución"]
@@ -136,6 +136,9 @@ sequenceDiagram
 
     U->>B: Arrastra una factura PDF o imagen
     B->>B: Muestra la animación de escaneo
+    opt Modo Demo con una foto o un PDF escaneado
+        B->>B: OCR con Tesseract.js (texto en ocr_text)
+    end
     B->>P: POST /api/v1/invoices/upload (multipart con progreso)
     P->>A: Reenvía la petición (límite 16 MB)
     A->>A: Valida tamaño y tipo MIME
@@ -143,7 +146,7 @@ sequenceDiagram
     alt Modo IA disponible
         X->>X: Claude Vision devuelve JSON mediante herramientas
     else Modo Demo o fallback
-        X->>X: pypdf y expresiones regulares
+        X->>X: pypdf o texto OCR, y expresiones regulares
     end
     X-->>A: Resultado normalizado y avisos
     A->>D: Guarda proveedor, factura y líneas
@@ -247,7 +250,7 @@ El extractor elige su estrategia según la variable `ANTHROPIC_API_KEY`.
 
 | Modo | Condición | Cómo extrae los datos |
 |---|---|---|
-| **Modo Demo** | `ANTHROPIC_API_KEY` vacía (valor por defecto) | Lee el texto del PDF con pypdf y aplica un parser basado en expresiones regulares. No realiza llamadas externas. |
+| **Modo Demo** | `ANTHROPIC_API_KEY` vacía (valor por defecto) | Lee el texto del PDF con pypdf y aplica un parser basado en expresiones regulares. Las fotos y los PDF escaneados se leen antes con OCR en el navegador (Tesseract). No realiza llamadas externas. |
 | **Modo IA** | `ANTHROPIC_API_KEY` definida | Envía el documento a Claude Vision (modelo `ANTHROPIC_MODEL`) y obtiene los datos en JSON mediante uso de herramientas. |
 
 Ambos modos devuelven el mismo formato de resultado, así que las reglas de auditoría se aplican igual sobre los dos.
@@ -255,7 +258,10 @@ Ambos modos devuelven el mismo formato de resultado, así que las reglas de audi
 Notas sobre el Modo Demo:
 
 - Funciona con los PDF generados por `generate_sample_invoices.py` y con PDF de texto que sigan un diseño parecido.
-- Si el fichero no contiene texto utilizable (imágenes o escaneos), genera una factura sintética determinista a partir del hash del fichero. Sirve para probar el flujo completo, pero **sus datos no proceden del documento**: la factura se marca como sintética (`is_synthetic`), la regla `SYNTHETIC_DATA` la deja en *Discrepancia* y el exportador se niega a generar su XML.
+- **OCR gratuito en el navegador.** Las imágenes (PNG, JPG, WEBP) y los PDF sin capa de texto se leen en el navegador con [Tesseract.js](https://github.com/naptha/tesseract.js) y el modelo LSTM de español (unos 6 MB que se descargan la primera vez y quedan en caché). Para los PDF escaneados, [pdf.js](https://mozilla.github.io/pdf.js/) rasteriza hasta 5 páginas a unos 216 ppp. El texto reconocido viaja con la subida en el campo `ocr_text` y el mismo parser lo interpreta. Antes, una normalización corrige los fallos típicos del OCR, como «nº» leído como «n*%» o los bordes de tabla leídos como «|». El documento no sale del equipo para leerse, y los recursos se sirven desde el propio origen, sin CDN (`scripts/copy-ocr-assets.mjs`).
+  - Con fotos o escaneos nítidos (unos 150 ppp o más) lee bien las facturas de ejemplo, también las que llevan tabla de líneas, IVA mixto o IRPF. Con imágenes muy pequeñas (menos de unos 90 ppp) empieza a confundir dígitos. En ese caso la auditoría lo detecta como discrepancia, porque los importes dejan de cuadrar, y la factura nunca sale como válida.
+  - La factura queda con el aviso «Datos leídos con OCR» para que se revisen el NIF, las fechas y los importes antes de exportar.
+- Si no hay texto utilizable ni siquiera con OCR (por ejemplo, un cliente de la API que sube una imagen sin `ocr_text`), genera una factura sintética determinista a partir del hash del fichero. Sirve para probar el flujo completo, pero **sus datos no proceden del documento**: la factura se marca como sintética (`is_synthetic`), la regla `SYNTHETIC_DATA` la deja en *Discrepancia* y el exportador se niega a generar su XML.
 
 En Modo IA, si la llamada a la API falla o supera `AI_TIMEOUT_SECONDS`, la subida responde 422. Solo con `AI_FALLBACK_TO_DEMO=true` se recurre al Modo Demo, y el resultado lleva un aviso.
 
@@ -304,7 +310,7 @@ Todos los endpoints de negocio cuelgan de `/api/v1`. La documentación interacti
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| POST | `/api/v1/invoices/upload` | Sube una factura (PDF, PNG, JPG o WEBP), extrae sus datos y ejecuta la auditoría. El tamaño máximo lo fija `MAX_UPLOAD_SIZE_MB` (15 MB por defecto). |
+| POST | `/api/v1/invoices/upload` | Sube una factura (PDF, PNG, JPG o WEBP), extrae sus datos y ejecuta la auditoría. El tamaño máximo lo fija `MAX_UPLOAD_SIZE_MB` (15 MB por defecto). El campo opcional `ocr_text` (hasta 60 000 caracteres) lleva el texto reconocido por OCR en el cliente; el Modo Demo lo usa cuando el documento no tiene texto propio. |
 | POST | `/api/v1/invoices` | Crea una factura manualmente y la audita. |
 | GET | `/api/v1/invoices` | Lista paginada con filtros: estado, proveedor, NIF/CIF, fechas, importes, método de extracción, `exported` (`true` = XML Facturae ya generado), búsqueda y ordenación. |
 | GET | `/api/v1/invoices/{id}` | Detalle de una factura, con sus líneas y el resultado de la auditoría. |
@@ -463,7 +469,7 @@ Para parar los servicios, usa `docker compose --profile mysql down`. Añade `-v`
 
 ## Tests y cobertura
 
-El backend tiene **1264 tests** y una cobertura de alrededor del **96 %**; el frontend, **91 tests** con vitest (`npm run test` en `frontend/`). Desde el directorio `backend/`:
+El backend tiene **1286 tests** y una cobertura de alrededor del **96 %**; el frontend, **104 tests** con vitest (`npm run test` en `frontend/`). Desde el directorio `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -567,8 +573,8 @@ smart-invoice-auditor/
 - **Fase 1 (completada):** backend con extracción, auditoría, exportación Facturae y CSV, API REST y contenedores.
 - **Fase 2 (completada):** frontend con panel en React, Vite y TypeScript para subir facturas, revisar auditorías y descargar exportables.
 - **Fase 3 (completada):** CI con GitHub Actions (backend en Python 3.11 y 3.12, frontend y build de Docker), demo en GitHub Pages con el backend en WebAssembly y autenticación opcional por API key (`API_KEY`, cabecera `X-API-Key`).
+- **Fase 4 (completada):** la web y la demo arrancan vacías, OCR gratuito en el navegador para fotos y PDF escaneados, y Modo IA en la demo con la API key del propio visitante.
 - **Siguientes pasos:**
-  - OCR para PDF escaneados.
   - Envío de las facturas firmadas a FACe mediante su servicio web.
   - Usuarios y roles en lugar de una única API key.
   - Migraciones versionadas con Alembic.
@@ -593,7 +599,7 @@ Distribuido bajo la licencia MIT. Consulta el fichero [LICENSE](LICENSE) para m�
 
 **What it does.**
 
-- **Extraction with two strategies:** Claude Vision when `ANTHROPIC_API_KEY` is set (AI mode), or a local parser based on pypdf and regular expressions with no external calls (demo mode). Both return the same format.
+- **Extraction with two strategies:** Claude Vision when `ANTHROPIC_API_KEY` is set (AI mode), or a local parser based on pypdf and regular expressions with no external calls (demo mode). In demo mode, photos and scanned PDFs are first read with free in-browser OCR (Tesseract.js, Spanish model; pdf.js rasterizes scans). Both return the same format.
 - **18 audit rules** that compare every amount to the cent: tax ID validation for NIF, NIE and CIF, line arithmetic, VAT at 21, 10 and 4 percent, IRPF withholdings, totals, duplicate detection, currency, DIR3 codes and party data required by Facturae. Every check is logged, including the passed ones.
 - **Facturae 3.2.2 export** with optional XAdES signature (PKCS#12 certificate), and CSV export for Excel.
 - **Web dashboard** built with React 19, TypeScript and Tailwind CSS v4: KPI cards, drag-and-drop upload with a live audit reveal, a filterable invoice table with status badges, and an inspector to reconcile, correct, re-audit and export each invoice.
@@ -611,8 +617,8 @@ Optionally, `docker compose --profile seed run --rm seed` loads 25 sample invoic
 
 Then open http://localhost:8080 for the web interface and http://localhost:8000/docs for the API.
 
-**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1264 tests (about 96 percent coverage) and the frontend 91 vitest tests; GitHub Actions runs them on every push.
+**Stack.** Python 3.11+, FastAPI, SQLAlchemy 2.0, Pydantic v2, SQLite or MySQL 8.4, React 19, TypeScript, Vite, Tailwind CSS v4, Docker with nginx. The backend has 1286 tests (about 96 percent coverage) and the frontend 104 vitest tests; GitHub Actions runs them on every push.
 
-**Roadmap.** OCR for scanned PDFs, submission of signed invoices to the FACe web service, users and roles, and Alembic migrations.
+**Roadmap.** Submission of signed invoices to the FACe web service, users and roles, and Alembic migrations.
 
 **Author:** Alex Guillamón Roca ([github.com/dftii](https://github.com/dftii)). **License:** MIT.

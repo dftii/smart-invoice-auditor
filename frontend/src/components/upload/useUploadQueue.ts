@@ -3,19 +3,26 @@ import type { UploadResponse } from '../../types/api'
 import { createQueueEngine, type QueueEngine } from './queueEngine'
 import { isTerminal, type UploadItem } from './types'
 
-export interface UploadQueue extends Omit<QueueEngine, 'mount' | 'dispose' | 'setOnUploaded' | 'setOnMaybeCreated'> {
+export interface UploadQueue
+  extends Omit<QueueEngine, 'mount' | 'dispose' | 'setOnUploaded' | 'setOnMaybeCreated' | 'setOcrEnabled'> {
   items: UploadItem[]
   /** Files still waiting, uploading or animating. */
   activeCount: number
   finishedCount: number
 }
 
+/** `ocrEnabled`: read images and scanned PDFs with OCR in the browser before uploading them (Modo Demo). */
 export function useUploadQueue(
   onUploaded: (result: UploadResponse) => void,
   onMaybeCreated?: () => void,
+  ocrEnabled = false,
 ): UploadQueue {
   const [items, setItems] = useState<UploadItem[]>([])
   const [engine] = useState(() => createQueueEngine({ publish: setItems }))
+
+  useEffect(() => {
+    engine.setOcrEnabled(ocrEnabled)
+  }, [engine, ocrEnabled])
 
   useEffect(() => {
     engine.setOnUploaded(onUploaded)

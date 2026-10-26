@@ -23,7 +23,8 @@ function pasteTargetsInput(target: EventTarget | null): boolean {
 }
 
 export function UploadZone({ extractionMode, maxUploadMb, onUploaded, onMaybeCreated, onInspect }: UploadZoneProps) {
-  const queue = useUploadQueue(onUploaded, onMaybeCreated)
+  // Without AI the backend can only read text: images and scans are read with OCR in the browser first.
+  const queue = useUploadQueue(onUploaded, onMaybeCreated, extractionMode === 'DEMO')
   const { addFiles } = queue
 
   // Pasting an image anywhere on the page uploads it, except while typing in a field or with a dialog open.

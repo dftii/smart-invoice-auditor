@@ -2,6 +2,10 @@ import { ApiError, isHttpTransport, uploadInvoice } from '../../services/api'
 import type { UploadResponse } from '../../types/api'
 import { activeStepIndex, isTerminal, type ProcessingStep, type UploadItem, type UploadPhase } from './types'
 import { validateFile } from './validation'
+import { isOcrCandidate, recognizeInvoiceText, type OcrProgressListener } from '../../lib/ocr'
+
+/** Recognises the text of a file without a text layer; null when OCR is not needed. See lib/ocr.ts. */
+export type TextRecognizer = (file: File, onProgress: OcrProgressListener, signal: AbortSignal) => Promise<string | null>
 
 /** The server does extraction + audit in one request, so the scan/extract/audit steps are timed. */
 const STEP_DELAY_MS: Record<Exclude<ProcessingStep, 'scanning'>, number> = { extracting: 900, auditing: 1800 }
@@ -19,11 +23,15 @@ interface Run {
 
 export interface QueueEngineDeps {
   publish: (items: UploadItem[]) => void
+  /** Injected in tests; defaults to the in-browser Tesseract OCR. */
+  recognizeText?: TextRecognizer
 }
 
 export interface QueueEngine {
   mount: () => void
   setOnUploaded: (listener: (result: UploadResponse) => void) => void
+  /** OCR before uploading images and scanned PDFs: on in Modo Demo; the AI reads documents by itself. */
+  setOcrEnabled: (enabled: boolean) => void
   /** Called when a request was abandoned after it had been sent: the invoice list may have changed. */
   setOnMaybeCreated: (listener: () => void) => void
   dispose: () => void
@@ -63,6 +71,8 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
   let nextId = 1
   let notify: (result: UploadResponse) => void = () => {}
   let notifyMaybeCreated: () => void = () => {}
+  let ocrEnabled = false
+  const recognizeText = deps.recognizeText ?? recognizeInvoiceText
   const runs = new Map<number, Run>()
   const skipWhenQueued = new Set<number>()
 
@@ -121,12 +131,12 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
     if (phase?.kind === 'processing') setPhase(id, { ...phase, step })
   }
 
-  const beginProcessing = (id: number, run: Run) => {
-    run.uploadSent = true
+  /** `firstStep` is 'extracting' when the text was already recognised in the browser (the scan really happened). */
+  const beginProcessing = (id: number, run: Run, firstStep: ProcessingStep = 'scanning') => {
     if (run.processStart !== null) return
     run.processStart = Date.now()
-    setPhase(id, { kind: 'processing', step: 'scanning', result: null })
-    schedule(run, () => setStep(id, 'extracting'), STEP_DELAY_MS.extracting)
+    setPhase(id, { kind: 'processing', step: firstStep, result: null })
+    if (firstStep === 'scanning') schedule(run, () => setStep(id, 'extracting'), STEP_DELAY_MS.extracting)
     schedule(run, () => setStep(id, 'auditing'), STEP_DELAY_MS.auditing)
   }
 
@@ -145,6 +155,7 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       return
     }
     notify(result)
+    run.uploadSent = true
     beginProcessing(id, run)
     const phase = phaseOf(id)
     if (phase?.kind === 'processing') setPhase(id, { ...phase, result })
@@ -190,20 +201,53 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       controller: new AbortController(),
       timers: new Set(),
       processStart: null,
-      // Without a network upload (in-process transport) the work starts immediately: nothing is "not yet sent".
-      uploadSent: !isHttpTransport(),
+      uploadSent: false, // set by send(): nothing reaches the backend while OCR runs
       skip: skipWhenQueued.delete(item.id),
     }
     runs.set(item.id, run)
-    setPhase(item.id, { kind: 'uploading', loaded: 0, total: item.file.size })
+    if (!ocrEnabled || !isOcrCandidate(item.file)) {
+      send(item, run, null, false)
+      return
+    }
+    setPhase(item.id, { kind: 'reading', stage: 'Preparando el motor OCR', progress: 0 })
+    recognizeText(
+      item.file,
+      ({ stage, progress }) => {
+        if (alive && phaseOf(item.id)?.kind === 'reading') setPhase(item.id, { kind: 'reading', stage, progress })
+      },
+      run.controller.signal,
+    ).then(
+      (text) => {
+        if (run.controller.signal.aborted) onFailure(item.id, run, new DOMException('Subida cancelada', 'AbortError'))
+        else send(item, run, text, true)
+      },
+      (error: unknown) => onFailure(item.id, run, error),
+    )
+  }
+
+  /**
+   * After OCR the item goes straight to "processing": the upload itself is instant in the demo and a few ms on a
+   * local backend, and showing an upload bar after the scan step would move the stepper backwards.
+   */
+  function send(item: UploadItem, run: Run, ocrText: string | null, afterReading: boolean) {
+    const firstStep: ProcessingStep = ocrText ? 'extracting' : 'scanning'
+    // Without a network upload (in-process transport) the work starts immediately: nothing is "not yet sent".
+    run.uploadSent = !isHttpTransport()
+    if (afterReading) beginProcessing(item.id, run, firstStep)
+    else setPhase(item.id, { kind: 'uploading', loaded: 0, total: item.file.size })
     uploadInvoice(
       item.file,
       ({ loaded, total }) => {
-        if (!alive || phaseOf(item.id)?.kind !== 'uploading') return
-        if (loaded >= total) beginProcessing(item.id, run)
-        else setPhase(item.id, { kind: 'uploading', loaded, total })
+        if (!alive) return
+        if (loaded >= total) {
+          run.uploadSent = true
+          beginProcessing(item.id, run, firstStep)
+        } else if (phaseOf(item.id)?.kind === 'uploading') {
+          setPhase(item.id, { kind: 'uploading', loaded, total })
+        }
       },
       run.controller.signal,
+      ocrText,
     ).then(
       (result) => onResponse(item.id, run, result),
       (error: unknown) => onFailure(item.id, run, error),
@@ -256,6 +300,10 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
       notifyMaybeCreated = listener
     },
 
+    setOcrEnabled(enabled) {
+      ocrEnabled = enabled
+    },
+
     dispose() {
       alive = false
       busy = false
@@ -292,7 +340,9 @@ export function createQueueEngine(deps: QueueEngineDeps): QueueEngine {
         setPhase(id, { kind: 'cancelled', failedStep: 0, maybeCreated: false })
         return
       }
-      if (phase?.kind === 'uploading' || (phase?.kind === 'processing' && !phase.result)) runs.get(id)?.controller.abort()
+      if (phase?.kind === 'reading' || phase?.kind === 'uploading' || (phase?.kind === 'processing' && !phase.result)) {
+        runs.get(id)?.controller.abort()
+      }
     },
 
     retry(id) {

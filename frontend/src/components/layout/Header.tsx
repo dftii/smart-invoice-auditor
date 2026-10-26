@@ -56,7 +56,7 @@ export function Header({ health, mode }: HeaderProps) {
               title={
                 mode === 'AI'
                   ? 'Extracción con inteligencia artificial activa'
-                  : 'Sin clave de IA: los datos se extraen con el parser de texto local'
+                  : 'Sin clave de IA: los datos se extraen con el parser de texto y OCR en el navegador'
               }
             >
               {mode === 'AI' ? (

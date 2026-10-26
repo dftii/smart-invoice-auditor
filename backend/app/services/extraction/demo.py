@@ -11,13 +11,14 @@ from app.models import ExtractionMethod
 from app.schemas import ExtractionResult
 from app.services.extraction.base import (
     IMAGE_MIMES,
+    MAX_OCR_TEXT_CHARS,
     MAX_PDF_PAGES,
     PDF_MIME,
     ExtractionStrategy,
     detect_mime_type,
 )
 from app.services.extraction.synthetic import SyntheticInvoiceFactory
-from app.services.extraction.text_parser import SpanishInvoiceTextParser
+from app.services.extraction.text_parser import SpanishInvoiceTextParser, normalize_ocr_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +37,28 @@ def _pdf_texts(content: bytes) -> list[str]:
     return [text for text in (layout, plain) if text.strip()]
 
 
+OCR_WARNING = (
+    "Datos leídos con OCR a partir de la imagen: revisa el NIF/CIF, las fechas y los importes antes de exportar."
+)
+
+
 class DemoParserStrategy(ExtractionStrategy):
-    """Offline extraction: pypdf + regex parser, with a deterministic synthetic invoice as last resort."""
+    """Offline extraction: pypdf + regex parser, with a deterministic synthetic invoice as last resort.
+
+    Images and scanned PDFs have no text layer: when the client sends the text it recognised with OCR
+    (``ocr_text``, Tesseract in the browser), the same parser reads it before falling back to the synthetic invoice.
+    """
 
     name = "demo-parser"
     method = ExtractionMethod.DEMO
+    accepts_ocr_text = True
 
     def __init__(self) -> None:
         self._parser = SpanishInvoiceTextParser()
 
-    def extract(self, content: bytes, filename: str, mime_type: str) -> ExtractionResult:
+    def extract(self, content: bytes, filename: str, mime_type: str, ocr_text: str | None = None) -> ExtractionResult:
         media_type = mime_type if mime_type in (PDF_MIME, *IMAGE_MIMES) else detect_mime_type(content, filename)
-        reason = "El documento es una imagen y el modo demo no incluye OCR."
+        reason = "El documento es una imagen y no se ha recibido texto reconocido por OCR."
         if media_type == PDF_MIME:
             texts = _pdf_texts(content)
             reason = "El PDF no contiene texto legible (documento escaneado o dañado)."
@@ -56,6 +67,13 @@ class DemoParserStrategy(ExtractionStrategy):
                 if parsed is not None:
                     return parsed
                 reason = "El texto del PDF no pudo interpretarse como una factura española."
+        if ocr_text and ocr_text.strip():
+            parsed = self._parser.parse(normalize_ocr_text(ocr_text[:MAX_OCR_TEXT_CHARS]))
+            if parsed is not None:
+                parsed.strategy_name = f"{parsed.strategy_name}+ocr"
+                parsed.warnings.insert(0, OCR_WARNING)
+                return parsed
+            reason = "El texto reconocido por OCR no pudo interpretarse como una factura española."
         return self.synthesize(content, reason)
 
     @staticmethod

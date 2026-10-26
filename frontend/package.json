@@ -4,19 +4,23 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "node scripts/copy-ocr-assets.mjs && vite",
+    "build": "node scripts/copy-ocr-assets.mjs && tsc -b && vite build",
     "build:demo-bundle": "node scripts/build-demo-bundle.mjs",
-    "build:demo": "node scripts/build-demo-bundle.mjs && tsc -b && vite build --mode demo",
+    "build:demo": "node scripts/build-demo-bundle.mjs && node scripts/copy-ocr-assets.mjs && tsc -b && vite build --mode demo",
     "typecheck": "tsc -b --noEmit",
     "lint": "oxlint src",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "copy:ocr": "node scripts/copy-ocr-assets.mjs"
   },
   "dependencies": {
+    "@tesseract.js-data/spa": "1.0.0",
     "lucide-react": "^1.61.0",
+    "pdfjs-dist": "6.4.299",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

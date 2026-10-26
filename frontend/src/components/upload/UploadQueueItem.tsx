@@ -49,7 +49,7 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
   const [confirmingRetry, setConfirmingRetry] = useState(false)
 
   const checksVisible = expanded ?? phase.kind === 'revealing'
-  const canCancel = phase.kind === 'uploading' || (phase.kind === 'processing' && !phase.result)
+  const canCancel = phase.kind === 'reading' || phase.kind === 'uploading' || (phase.kind === 'processing' && !phase.result)
   const canSkip = (phase.kind === 'processing' && phase.result !== null) || phase.kind === 'revealing'
   const canRetry = phase.kind === 'cancelled' || (phase.kind === 'error' && phase.retryable)
   // The server may already hold this invoice; retrying then needs an explicit "yes, duplicate it".
@@ -60,6 +60,8 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
     switch (phase.kind) {
       case 'queued':
         return 'En cola'
+      case 'reading':
+        return 'Leyendo el texto (OCR)…'
       case 'uploading':
         return 'Subiendo…'
       case 'processing':
@@ -129,6 +131,8 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
       </div>
 
       {phase.kind !== 'queued' && <PipelineStepper phase={phase} />}
+
+      {phase.kind === 'reading' && <OcrProgress stage={phase.stage} progress={phase.progress} />}
 
       {phase.kind === 'uploading' && <UploadProgress loaded={phase.loaded} total={phase.total} />}
 
@@ -211,6 +215,35 @@ export function UploadQueueItem({ item, onCancel, onRetry, onRemove, onSkip, onI
         </div>
       )}
     </li>
+  )
+}
+
+function OcrProgress({ stage, progress }: { stage: string; progress: number }) {
+  const percent = Math.min(100, Math.max(0, Math.round(progress * 100)))
+  return (
+    <div className="flex items-center gap-4 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-900/5">
+      <ScanVisual step="scanning" />
+      <div className="min-w-0 flex-1 space-y-2" role="status">
+        <div className="space-y-1">
+          <p className="text-sm font-semibold text-indigo-700">{stage}…</p>
+          <p className="text-sm text-slate-600">
+            OCR en tu navegador: el documento no sale de tu equipo para leerlo. La primera vez se descarga el modelo
+            de español (unos 6 MB).
+          </p>
+        </div>
+        <div
+          role="progressbar"
+          aria-label="Progreso del OCR"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          className="h-2 overflow-hidden rounded-full bg-slate-200"
+        >
+          <div className="h-full rounded-full bg-indigo-500 transition-[width] duration-200" style={{ width: `${percent}%` }} />
+        </div>
+        <p className="text-xs tabular-nums text-slate-500">{percent} %</p>
+      </div>
+    </div>
   )
 }
 
