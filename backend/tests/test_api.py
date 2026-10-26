@@ -257,6 +257,8 @@ EXPECTED_ROUTES = {
     ("PATCH", f"{API}/suppliers/{{supplier_id}}"),
     ("GET", f"{API}/suppliers/{{supplier_id}}/invoices"),
     ("GET", f"{API}/stats/dashboard"),
+    ("GET", f"{API}/samples"),
+    ("GET", f"{API}/samples/{{filename}}"),
     ("GET", "/health"),
 }
 
@@ -280,7 +282,7 @@ def test_openapi_schema_lists_every_endpoint(client):
     assert {"InvoiceRead", "InvoiceCreate", "InvoiceUpdate", "AuditReport", "DashboardStats"} <= set(
         schema["components"]["schemas"]
     )
-    assert {tag["name"] for tag in schema["tags"]} == {"Facturas", "Proveedores", "Estadísticas", "Sistema"}
+    assert {tag["name"] for tag in schema["tags"]} == {"Facturas", "Proveedores", "Estadísticas", "Ejemplos", "Sistema"}
 
 
 def test_openapi_documents_upload_error_responses_and_unique_operation_ids(client):

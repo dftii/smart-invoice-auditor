@@ -185,3 +185,43 @@ describe('resolveApiBase', () => {
     expect(resolveApiBase('  ', './')).toBe('')
   })
 })
+
+describe('sample invoices', () => {
+  const sample = {
+    filename: '07_factura_imagen_demo.png',
+    title: 'Foto de factura',
+    description: 'Imagen sin texto',
+    media_type: 'image/png',
+    size_bytes: 3,
+    expected_status: 'VALIDATED' as const,
+  }
+
+  it('lists the samples from the API', async () => {
+    const seen: TransportRequest[] = []
+    setTransport(async (request) => {
+      seen.push(request)
+      return { status: 200, headers: { 'content-type': 'application/json' }, body: [sample] as never }
+    })
+    await expect(api.listSamples()).resolves.toEqual([sample])
+    expect(seen[0]).toMatchObject({ method: 'GET', path: '/api/v1/samples' })
+  })
+
+  it('downloads a sample as a File named and typed like the original', async () => {
+    const seen: TransportRequest[] = []
+    setTransport(async (request) => {
+      seen.push(request)
+      return { status: 200, headers: { 'content-type': 'image/png' }, body: new Blob([new Uint8Array([1, 2, 3])]) }
+    })
+    const file = await api.sampleFile(sample)
+    expect(seen[0].path).toBe('/api/v1/samples/07_factura_imagen_demo.png')
+    expect(file.name).toBe('07_factura_imagen_demo.png')
+    expect(file.type).toBe('image/png')
+    expect(new Uint8Array(await file.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
+  })
+
+  it('reports a missing sample as an API error', async () => {
+    const error = await failure(respond(404, { detail: 'Factura de ejemplo no encontrada' }), () => api.sampleFile(sample))
+    expect(error.status).toBe(404)
+    expect(error.message).toContain('ejemplo')
+  })
+})

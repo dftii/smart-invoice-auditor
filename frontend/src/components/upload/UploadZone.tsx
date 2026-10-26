@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import type { UploadResponse } from '../../types/api'
 import { Button } from '../ui/Button'
 import { DropArea } from './DropArea'
+import { SampleInvoices } from './SampleInvoices'
 import { UploadQueueItem } from './UploadQueueItem'
 import { useUploadQueue } from './useUploadQueue'
 import { nameClipboardFile } from './validation'
@@ -44,6 +45,8 @@ export function UploadZone({ extractionMode, maxUploadMb, onUploaded, onMaybeCre
   return (
     <section aria-label="Subida de facturas" className="space-y-4">
       <DropArea extractionMode={extractionMode} maxUploadMb={maxUploadMb} onFiles={queue.addFiles} />
+
+      <SampleInvoices onFiles={queue.addFiles} />
 
       {queue.items.length > 0 && (
         <div className="space-y-3">

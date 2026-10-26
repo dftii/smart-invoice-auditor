@@ -34,6 +34,7 @@ _state: dict = {"app": None, "lifespan": None, "booted": False}
 def configure_env() -> None:
     os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/demo.db")
     os.environ.setdefault("UPLOAD_DIR", "/tmp/uploads")
+    os.environ.setdefault("SAMPLES_DIR", f"{APP_ROOT}/samples")  # sample invoices shipped in backend.zip
     os.environ.setdefault("ENVIRONMENT", "production")
     os.environ.pop("ANTHROPIC_API_KEY", None)  # AI mode off -> DemoParserStrategy
     for p in (APP_ROOT,):

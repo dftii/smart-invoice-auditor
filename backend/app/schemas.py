@@ -541,3 +541,14 @@ class HealthResponse(BaseModel):
     version: str
     database: Literal["ok"]
     extraction_mode: Literal["AI", "DEMO"]
+
+
+class SampleInvoice(BaseModel):
+    """A sample invoice the user can upload with one click to try the application."""
+
+    filename: str
+    title: str = Field(description="Short Spanish label for the button")
+    description: str = Field(description="What the sample shows")
+    media_type: str
+    size_bytes: int
+    expected_status: AuditStatus = Field(description="Audit result the sample is designed to produce")

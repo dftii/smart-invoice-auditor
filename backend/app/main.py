@@ -18,7 +18,7 @@ from app.core.limits import UploadSizeLimitMiddleware
 from app.core.logging import configure_logging
 from app.core.security import require_api_key, warn_if_signing_unprotected
 from app.db.database import get_db, init_db, make_session_factory
-from app.routers import invoices, stats, suppliers
+from app.routers import invoices, samples, stats, suppliers
 from app.schemas import HealthResponse
 from app.services.extractor import get_extractor
 
@@ -36,6 +36,7 @@ OPENAPI_TAGS = [
     {"name": "Facturas", "description": "Subida, corrección, auditoría y exportación de facturas."},
     {"name": "Proveedores", "description": "Emisores de las facturas y su facturación acumulada."},
     {"name": "Estadísticas", "description": "Indicadores agregados para el panel de control."},
+    {"name": "Ejemplos", "description": "Facturas de ejemplo para probar la aplicación con un clic."},
     {"name": "Sistema", "description": "Estado del servicio."},
 ]
 
@@ -77,7 +78,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         expose_headers=["Content-Disposition"],
     )
     register_exception_handlers(application)
-    for router in (invoices.router, suppliers.router, stats.router):
+    for router in (invoices.router, suppliers.router, stats.router, samples.router):
         application.include_router(router, prefix=settings.api_prefix, dependencies=[Depends(require_api_key)])
 
     @application.get("/health", response_model=HealthResponse, tags=["Sistema"], summary="Comprobar el estado")

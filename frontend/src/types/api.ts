@@ -318,6 +318,18 @@ export interface HealthResponse {
   extraction_mode: ExtractionMode
 }
 
+/** Sample invoice offered to try the application (GET /api/v1/samples). */
+export interface SampleInvoice {
+  filename: string
+  /** Short label for the button. */
+  title: string
+  description: string
+  media_type: string
+  size_bytes: number
+  /** Audit result the sample is designed to produce. */
+  expected_status: AuditStatus
+}
+
 /** One FastAPI/pydantic validation error (HTTP 422). */
 export interface ValidationIssue {
   loc: (string | number)[]

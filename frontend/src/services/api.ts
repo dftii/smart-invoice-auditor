@@ -9,6 +9,7 @@ import type {
   InvoiceSummary,
   InvoiceUpdate,
   Page,
+  SampleInvoice,
   UploadResponse,
   ValidationIssue,
   ValidationLog,
@@ -541,8 +542,19 @@ export async function uploadInvoice(
   })
 }
 
+/** Downloads a sample invoice as a File, ready to go through the same upload queue as the user's own files. */
+async function sampleFile(sample: SampleInvoice, signal?: AbortSignal): Promise<File> {
+  const response = await send({ method: 'GET', path: `${API_PREFIX}/samples/${encodeURIComponent(sample.filename)}`, signal })
+  const blob = asBlob(response.body, headerValue(response.headers, 'content-type'))
+  return new File([blob], sample.filename, { type: sample.media_type })
+}
+
 export const api = {
   health: (): Promise<HealthResponse> => requestJson({ method: 'GET', path: '/health' }),
+
+  listSamples: (): Promise<SampleInvoice[]> => requestJson({ method: 'GET', path: `${API_PREFIX}/samples` }),
+
+  sampleFile,
 
   stats: (): Promise<DashboardStats> => requestJson({ method: 'GET', path: `${API_PREFIX}/stats/dashboard` }),
 

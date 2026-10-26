@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the assets of the in-browser demo (Pyodide) into frontend/public/demo/ (gitignored):
 //
-//   backend.zip       app/ (backend/app without __pycache__) + runtime.py (ASGI bridge)
+//   backend.zip       app/ (backend/app without __pycache__) + samples/ + runtime.py (ASGI bridge)
 //   wheels/*.whl      pure-Python wheels (fastapi, starlette, ...) pinned from backend/requirements.txt
 //   manifest.json     versions + sha256 of everything above (the worker reads it to know what to fetch)
 //
@@ -110,6 +110,9 @@ function buildBackendZip() {
   const appDir = join(backend, 'app')
   if (!existsSync(appDir)) throw new Error(`backend/app not found at ${appDir}`)
   for (const file of listFiles(appDir)) add(file, relative(backend, file).split(sep).join('/'))
+  // Sample invoices for "Probar con un ejemplo" (GET /api/v1/samples; runtime.py points SAMPLES_DIR here).
+  const samplesDir = join(backend, 'samples')
+  for (const file of listFiles(samplesDir)) add(file, `samples/${relative(samplesDir, file).split(sep).join('/')}`)
   add(join(frontend, 'src', 'demo', 'runtime.py'), 'runtime.py')
   const zip = buildZip(entries)
   writeFileSync(join(outDir, 'backend.zip'), zip)
