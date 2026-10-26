@@ -73,7 +73,9 @@ async function boot(): Promise<void> {
 
   // 1. Python runtime. Our own assets download in parallel with the (much larger) Pyodide core.
   progress(1)
-  const manifest = (await (await fetch(assetUrl('manifest.json'))).json()) as Manifest
+  // GitHub Pages lets browsers reuse files for 10 minutes; revalidating the (tiny) manifest makes a new deploy load the
+  // matching backend.zip at once (its URL carries the hash) instead of the previous one from the cache.
+  const manifest = (await (await fetch(assetUrl('manifest.json'), { cache: 'no-cache' })).json()) as Manifest
   const backendZip = fetchBytes(`${assetUrl(manifest.backend.file)}?v=${manifest.backend.sha256.slice(0, 12)}`)
   const wheels = Promise.all(manifest.wheels.map((wheel) => fetchBytes(assetUrl(wheel.file))))
   // Keep a rejection from a never-awaited promise from surfacing as "unhandled" while Pyodide is still loading.
