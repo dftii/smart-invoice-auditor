@@ -5,7 +5,6 @@ export const BOOT_STAGES = [
   'Descargando Python (WebAssembly)…',
   'Instalando dependencias…',
   'Cargando backend FastAPI…',
-  'Generando 25 facturas de demostración…',
 ] as const
 
 export interface BootProgress {

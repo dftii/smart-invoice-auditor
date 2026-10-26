@@ -1,10 +1,9 @@
 """In-browser ASGI bridge for the SmartInvoice-FACe Auditor FastAPI backend (Pyodide).
 
-Shipped inside backend.zip (next to app/ and scripts/seed.py) and extracted to /app by src/demo/worker.ts:
+Shipped inside backend.zip (next to app/) and extracted to /app by src/demo/worker.ts. The database starts empty:
 
     const runtime = pyodide.pyimport("runtime")
     await runtime.boot_js()      // shims + import app.main + ASGI lifespan startup (init_db)
-    await runtime.seed_js()      // demo invoices (idempotent)
     const r = await runtime.handle_js(method, path, query, headers, bodyUint8Array)
 
 Public coroutine API:
@@ -19,7 +18,7 @@ import sys
 import types
 from urllib.parse import quote
 
-APP_ROOT = "/app"  # directory that contains the `app` package and `scripts/`
+APP_ROOT = "/app"  # directory that contains the `app` package
 
 _state: dict = {"app": None, "lifespan": None, "booted": False}
 
@@ -143,31 +142,11 @@ async def asgi_request(app, method: str, path: str, query: str = "", headers=Non
     return status, resp_headers, b"".join(chunks)
 
 
-# --------------------------------------------------------------------------- boot / seed
+# --------------------------------------------------------------------------- boot
 
 
-def seed_demo() -> int:
-    """Seed the 25 demo invoices (idempotent). Returns how many invoices exist afterwards."""
-    from sqlalchemy import func, select
-
-    try:  # newer backend: lazy engine / session factory
-        from app.db.database import get_session_factory
-
-        factory = get_session_factory()
-    except ImportError:  # older backend: module-level SessionLocal
-        from app.db.database import SessionLocal as factory
-    from app.models import Invoice
-    from scripts import seed as seed_mod  # /app/scripts/seed.py (namespace package, no __init__ needed)
-
-    with factory() as db:
-        if not seed_mod.is_seeded(db):
-            seed_mod.seed(db)
-            db.commit()
-        return db.scalar(select(func.count()).select_from(Invoice))
-
-
-async def boot(seed: bool = False) -> dict:
-    """Idempotent: shims, import app.main, run ASGI lifespan startup (init_db), optionally seed."""
+async def boot() -> dict:
+    """Idempotent: shims, import app.main, run ASGI lifespan startup (init_db creates the empty tables)."""
     if _state["booted"]:
         return {"already": True}
     configure_env()
@@ -177,8 +156,6 @@ async def boot(seed: bool = False) -> dict:
 
     _state["app"] = app.main.app
     await _lifespan_start(app.main.app)
-    if seed:
-        info["invoices"] = seed_demo()
     _state["booted"] = True
     return info
 
@@ -187,20 +164,15 @@ async def boot(seed: bool = False) -> dict:
 
 
 async def boot_js() -> str:
-    """JS entry point for boot() without seeding: returns a JSON string."""
+    """JS entry point for boot(): returns a JSON string."""
     import json
 
-    return json.dumps(await boot(seed=False))
-
-
-def seed_js() -> int:
-    """JS entry point: seed the demo invoices, returns the invoice count."""
-    return seed_demo()
+    return json.dumps(await boot())
 
 
 async def handle(method, path, query="", headers=None, body=b""):
     if not _state["booted"]:
-        await boot(seed=False)
+        await boot()
     return await asgi_request(_state["app"], method, path, query, headers, bytes(body or b""))
 
 

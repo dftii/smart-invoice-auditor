@@ -130,7 +130,7 @@ export function MonthlyChart({ monthly }: MonthlyChartProps) {
         </svg>
         {!hasData && (
           <p className="pointer-events-none absolute inset-x-0 top-1/3 text-center text-sm text-slate-500">
-            Sin facturas todavía. Sube un archivo o ejecuta <code className="font-mono">python scripts/seed.py</code>.
+            Sin facturas todavía. Sube tu primera factura para ver la evolución mensual.
           </p>
         )}
       </div>

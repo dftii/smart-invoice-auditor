@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Download, FileSearch, FileUp, SearchX } from 'lucide-react'
 import type { InvoiceFilters, SortField } from '../../types/api'
-import { api, isHttpTransport } from '../../services/api'
+import { api } from '../../services/api'
 import { useAsync } from '../../hooks/useAsync'
 import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { Button } from '../ui/Button'
@@ -92,15 +92,7 @@ function EmptyState({ filtered, onReset }: EmptyProps) {
         <p className="text-sm font-semibold text-slate-900">Todavía no hay facturas</p>
         <p className="mt-1 max-w-md text-sm text-slate-500">
           <FileUp aria-hidden className="mr-1 inline size-4 align-text-bottom" />
-          Sube un PDF o una imagen en la zona de arriba
-          {isHttpTransport() && (
-            <>
-              , o carga datos de ejemplo ejecutando{' '}
-              <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">python scripts/seed.py</code>{' '}
-              desde la carpeta <code className="font-mono text-xs">backend</code>
-            </>
-          )}
-          .
+          Sube un PDF o una imagen en la zona de arriba para auditar tu primera factura.
         </p>
       </div>
     </div>

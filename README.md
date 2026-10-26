@@ -29,7 +29,7 @@
   <a href="#el-problema">El problema</a> ·
   <a href="#la-solución">La solución</a> ·
   <a href="#arquitectura">Arquitectura</a> ·
-  <a href="#puesta-en-marcha-en-3-comandos">Puesta en marcha</a> ·
+  <a href="#puesta-en-marcha-en-2-comandos">Puesta en marcha</a> ·
   <a href="#interfaz-web">Interfaz web</a> ·
   <a href="#reglas-de-auditoría">Reglas de auditoría</a> ·
   <a href="#api">API</a> ·
@@ -43,7 +43,7 @@
 
 **https://dftii.github.io/smart-invoice-auditor/**
 
-GitHub Pages solo sirve archivos estáticos, así que la demo no llama a ningún servidor: descarga [Pyodide](https://pyodide.org) (CPython compilado a WebAssembly) y ejecuta **el mismo backend FastAPI de este repositorio** dentro de un Web Worker, con SQLite en memoria y las 25 facturas del seed. No es una API simulada: el auditor, el exportador Facturae y la base de datos son el código Python real.
+GitHub Pages solo sirve archivos estáticos, así que la demo no llama a ningún servidor: descarga [Pyodide](https://pyodide.org) (CPython compilado a WebAssembly) y ejecuta **el mismo backend FastAPI de este repositorio** dentro de un Web Worker, con SQLite en memoria. Arranca vacía, como un primer uso: solo verás las facturas que subas. No es una API simulada: el auditor, el exportador Facturae y la base de datos son el código Python real.
 
 - La primera carga descarga unos 14 MB y tarda unos 10 s; las siguientes, unos 5 s gracias a la caché.
 - Los datos viven en memoria y se reinician al recargar la página.
@@ -154,14 +154,13 @@ sequenceDiagram
     B->>U: Revela la comprobación en tiempo real y el estado final
 ```
 
-## Puesta en marcha en 3 comandos
+## Puesta en marcha en 2 comandos
 
-Necesitas Git y Docker con Docker Compose v2.24 o superior. Con estos tres comandos tienes la aplicación completa, con datos de demostración:
+Necesitas Git y Docker con Docker Compose v2.24 o superior. Con estos dos comandos tienes la aplicación completa, con la base de datos vacía:
 
 ```bash
 git clone https://github.com/dftii/smart-invoice-auditor.git && cd smart-invoice-auditor
 docker compose up -d --build
-docker compose --profile seed run --rm seed
 ```
 
 En Windows PowerShell 5.1, que no admite `&&`, usa punto y coma en la primera línea:
@@ -169,7 +168,6 @@ En Windows PowerShell 5.1, que no admite `&&`, usa punto y coma en la primera l�
 ```powershell
 git clone https://github.com/dftii/smart-invoice-auditor.git; cd smart-invoice-auditor
 docker compose up -d --build
-docker compose --profile seed run --rm seed
 ```
 
 Después abre:
@@ -177,7 +175,7 @@ Después abre:
 - **Interfaz web:** http://localhost:8080
 - **Documentación interactiva de la API:** http://localhost:8000/docs
 
-El tercer comando carga 25 facturas de demostración auditadas por el mismo auditor que usa la aplicación. Es idempotente: si ya existen, no cambia nada. Para volver a crearlas, usa `docker compose --profile seed run --rm seed --reset`.
+Opcional, solo para desarrollo: `docker compose --profile seed run --rm seed` carga 25 facturas de ejemplo (ver [Datos de ejemplo](#datos-de-ejemplo-seed-opcional)).
 
 ## Sin Docker
 
@@ -192,7 +190,6 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-.\.venv\Scripts\python.exe scripts/seed.py
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
@@ -204,7 +201,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env
-python scripts/seed.py
 uvicorn app.main:app --reload
 ```
 
@@ -387,9 +383,9 @@ Para usar MySQL con Docker Compose, define la URL con el host `mysql` en el `.en
 
 **Importante:** no se incluye una herramienta de migración de datos. Una base de datos MySQL nueva empieza vacía; los datos existentes en SQLite no se copian automáticamente.
 
-## Datos de demostración (seed)
+## Datos de ejemplo (seed, opcional)
 
-El script `backend/scripts/seed.py` carga 25 facturas de demostración en la base de datos configurada en `DATABASE_URL` (SQLite por defecto). Cada factura pasa por el auditor real y el script falla si el resultado no coincide con el escenario previsto. Incluye facturas listas para FACe, facturas con avisos, errores aritméticos, identificadores fiscales inválidos y duplicados. Se ejecuta desde `backend/`:
+La aplicación arranca siempre con la base de datos vacía. Para desarrollo o pruebas, el script `backend/scripts/seed.py` carga 25 facturas de ejemplo en la base de datos configurada en `DATABASE_URL` (SQLite por defecto). Cada factura pasa por el auditor real y el script falla si el resultado no coincide con el escenario previsto. Incluye facturas listas para FACe, facturas con avisos, errores aritméticos, identificadores fiscales inválidos y duplicados. Se ejecuta desde `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/seed.py
@@ -600,15 +596,16 @@ Distribuido bajo la licencia MIT. Consulta el fichero [LICENSE](LICENSE) para m�
 - **Facturae 3.2.2 export** with optional XAdES signature (PKCS#12 certificate), and CSV export for Excel.
 - **Web dashboard** built with React 19, TypeScript and Tailwind CSS v4: KPI cards, drag-and-drop upload with a live audit reveal, a filterable invoice table with status badges, and an inspector to reconcile, correct, re-audit and export each invoice.
 
-**Live demo:** https://dftii.github.io/smart-invoice-auditor/ runs the real FastAPI backend inside the browser with Pyodide (WebAssembly), with an in-memory SQLite database seeded with 25 invoices. No server involved.
+**Live demo:** https://dftii.github.io/smart-invoice-auditor/ runs the real FastAPI backend inside the browser with Pyodide (WebAssembly), with an in-memory SQLite database. It starts empty: you only see the invoices you upload. No server involved.
 
 **Quick start with Docker:**
 
 ```bash
 git clone https://github.com/dftii/smart-invoice-auditor.git && cd smart-invoice-auditor
 docker compose up -d --build
-docker compose --profile seed run --rm seed
 ```
+
+Optionally, `docker compose --profile seed run --rm seed` loads 25 sample invoices for development.
 
 Then open http://localhost:8080 for the web interface and http://localhost:8000/docs for the API.
 

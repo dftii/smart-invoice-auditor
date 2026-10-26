@@ -32,7 +32,6 @@ interface PyodideModule {
 
 interface PyRuntime {
   boot_js(): Promise<string>
-  seed_js(): number
   handle_js(
     method: string,
     path: string,
@@ -95,18 +94,13 @@ async function boot(): Promise<void> {
   py.runPython('import importlib; importlib.invalidate_caches()')
   lap('dependencies')
 
-  // 3. The backend itself: backend/app + scripts/seed.py + runtime.py (ASGI bridge) -> /app.
+  // 3. The backend itself: backend/app + runtime.py (ASGI bridge) -> /app. The database starts empty.
   progress(3)
   py.unpackArchive(await backendZip, 'zip', { extractDir: '/app' })
   py.runPython('import sys\nif "/app" not in sys.path:\n    sys.path.insert(0, "/app")')
   runtime = py.pyimport('runtime')
   await runtime.boot_js() // env, shims, import app.main, ASGI lifespan startup (creates the tables)
   lap('backend')
-
-  // 4. Demo data.
-  progress(4)
-  runtime.seed_js()
-  lap('seed')
 
   timings.total = Math.round(performance.now() - t0)
   ctx.postMessage({ type: 'ready', timings })
